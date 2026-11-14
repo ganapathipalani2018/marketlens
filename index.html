@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b1220">
+    <meta name="description" content="A local Zerodha Kite Connect dashboard for live NSE and BSE quotes, browser price alerts, and manually confirmed CNC limit orders.">
+    <title>MarketLens — Live NSE/BSE Market Watch</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Main navigation">
+        <a class="brand" href="#" aria-label="MarketLens home">
+          <span class="brand-mark" aria-hidden="true">M</span>
+          <span>market<span class="brand-light">lens</span></span>
+        </a>
+        <div class="workspace-label">WORKSPACE</div>
+        <nav class="navigation">
+          <a class="nav-link active" href="#overview"><span aria-hidden="true">▦</span> Overview</a>
+          <a class="nav-link" href="#screener"><span aria-hidden="true">⌕</span> Stock analysis</a>
+          <a class="nav-link" href="#watchlist"><span aria-hidden="true">☆</span> Watchlist</a>
+          <a class="nav-link" href="#account"><span aria-hidden="true">₹</span> Account</a>
+          <a class="nav-link" href="#strategy-lab"><span aria-hidden="true">◈</span> Strategy lab</a>
+          <a class="nav-link" href="#alerts"><span aria-hidden="true">♧</span> Price alerts <span class="nav-count" id="alert-count">0</span></a>
+          <a class="nav-link" href="#risk-planner"><span aria-hidden="true">◈</span> Risk planner</a>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="demo-card">
+            <span class="demo-dot"></span>
+          <div><strong>Local workspace</strong><small>Paper automation only</small></div>
+          </div>
+          <p>Indicators and simulations are informational. No method can guarantee profits or eliminate loss.</p>
+        </div>
+      </aside>
+
+      <main class="main-content" id="overview">
+        <header class="topbar">
+          <div class="mobile-brand"><span class="brand-mark">M</span> market<span class="brand-light">lens</span></div>
+          <div class="data-status"><span class="status-dot" id="connection-dot"></span> <span id="connection-label">NOT CONNECTED</span> <span class="status-divider">·</span> Kite Connect</div>
+          <div class="topbar-right">
+            <span class="market-date" id="market-date"></span>
+            <button class="icon-button" id="help-button" aria-label="About this dashboard" title="About this dashboard">?</button>
+            <span class="account-name hidden" id="account-name"></span>
+            <button class="button button-secondary button-small" id="connect-button">Connect Zerodha</button>
+            <button class="button button-secondary button-small hidden" id="logout-button">Disconnect</button>
+          </div>
+        </header>
+
+        <div class="page-container">
+          <section class="page-heading">
+            <div>
+              <p class="eyebrow">YOUR MARKET WORKSPACE</p>
+              <h1>Market overview</h1>
+              <p class="subheading">Live market context, transparent indicators, and tools to test a plan before risking capital.</p>
+            </div>
+            <button class="button button-primary" id="create-alert-top"><span aria-hidden="true">＋</span> Create alert</button>
+          </section>
+
+          <section class="notice-banner" aria-label="Data and risk notice">
+            <span class="notice-icon" aria-hidden="true">i</span>
+            <p><strong>Trading involves risk:</strong> Live prices are not recommendations or a promise of profit. Orders are real, CNC delivery-only limit orders, and every order requires your explicit confirmation.</p>
+            <button class="notice-dismiss" id="dismiss-notice" aria-label="Dismiss notice">×</button>
+          </section>
+
+          <section class="market-grid" aria-label="Market snapshot">
+            <article class="market-card"><div class="metric-heading"><span>NIFTY 50</span><span class="metric-icon blue">N</span></div><div class="metric-value" id="index-nifty">--</div><div class="metric-foot" id="index-nifty-change">Connect for live data</div></article>
+            <article class="market-card"><div class="metric-heading"><span>NIFTY BANK</span><span class="metric-icon violet">B</span></div><div class="metric-value" id="index-bank">--</div><div class="metric-foot" id="index-bank-change">Connect for live data</div></article>
+            <article class="market-card"><div class="metric-heading"><span>SENSEX</span><span class="metric-icon orange">S</span></div><div class="metric-value" id="index-sensex">--</div><div class="metric-foot" id="index-sensex-change">Connect for live data</div></article>
+            <article class="market-card"><div class="metric-heading"><span>NIFTY IT</span><span class="metric-icon green">IT</span></div><div class="metric-value" id="index-it">--</div><div class="metric-foot" id="index-it-change">Connect for live data</div></article>
+          </section>
+
+          <section class="content-grid">
+            <div class="panel screener-panel" id="screener">
+              <div class="panel-heading">
+                <div><p class="eyebrow">LIVE NSE / BSE EQUITIES</p><h2>Market watch</h2></div>
+              <div class="panel-heading-actions"><button class="text-link" id="analyze-watchlist">Analyze watchlist</button><a class="text-link" href="#screener" id="view-all">View all <span aria-hidden="true">→</span></a></div>
+              </div>
+              <div class="toolbar">
+                <label class="search-box"><span aria-hidden="true">⌕</span><input id="stock-search" type="search" placeholder="Search NSE/BSE equities..." aria-label="Search NSE/BSE equities"></label>
+                <label class="select-wrap"><span class="visually-hidden">Filter by exchange</span><select id="signal-filter"><option value="all">All exchanges</option><option value="NSE">NSE</option><option value="BSE">BSE</option></select></label>
+                <label class="select-wrap"><span class="visually-hidden">Sort stocks</span><select id="stock-sort"><option value="featured">Featured stocks</option><option value="score">Highest indicator score</option><option value="change">Largest daily move</option><option value="name">Name A–Z</option></select></label>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>COMPANY</th><th>LIVE PRICE</th><th>DAY CHANGE</th><th>TREND</th><th>SCORE</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+                  <tbody id="stock-rows"></tbody>
+                </table>
+                <div class="empty-state hidden" id="empty-stocks">No stocks match your search.</div>
+              </div>
+              <div class="table-foot" id="quote-foot">Connect to Zerodha for live quotes. Quotes can be delayed or unavailable outside exchange hours.</div>
+            </div>
+
+            <aside class="right-column">
+              <section class="panel account-panel" id="account">
+                <div class="panel-heading compact-heading"><div><p class="eyebrow">READ ONLY · ZERODHA</p><h2>Account snapshot</h2></div><button class="text-link" id="refresh-account">Refresh</button></div>
+                <p class="account-updated" id="account-updated">Connect Zerodha to retrieve account details.</p>
+                <div class="account-tabs" role="tablist" aria-label="Zerodha account information">
+                  <button class="account-tab active" id="account-tab-funds" role="tab" aria-controls="account-tab-content" aria-selected="true" tabindex="0" data-account-tab="funds">Funds</button>
+                  <button class="account-tab" id="account-tab-holdings" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="holdings">Holdings</button>
+                  <button class="account-tab" id="account-tab-positions" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="positions">Positions</button>
+                  <button class="account-tab" id="account-tab-orders" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="orders">Orders</button>
+                  <button class="account-tab" id="account-tab-trades" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="trades">Trades</button>
+                  <button class="account-tab" id="account-tab-profile" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="profile">Profile</button>
+                </div>
+                <div class="account-tab-content" id="account-tab-content" role="tabpanel" aria-labelledby="account-tab-funds" tabindex="0" aria-live="polite">
+                  <p class="account-empty">Your profile, funds, holdings, positions, orders and trades will appear here after connecting.</p>
+                </div>
+                <div class="funds-actions">
+                  <h3>Manage funds with Zerodha</h3>
+                  <p>Payments and bank details are handled on Zerodha. MarketLens does not collect or store them.</p>
+                  <a href="https://kite.zerodha.com/" target="_blank" rel="noopener noreferrer">Open Kite for deposits or withdrawals <span aria-hidden="true">↗</span></a>
+                  <a href="https://console.zerodha.com/account/bank" target="_blank" rel="noopener noreferrer">Manage linked bank accounts in Console <span aria-hidden="true">↗</span></a>
+                </div>
+              </section>
+              <section class="panel watchlist-panel" id="watchlist">
+                <div class="panel-heading compact-heading"><div><p class="eyebrow">KEEP TRACK</p><h2>Your watchlist</h2></div><span class="count-pill" id="watchlist-count">0</span></div>
+                <div class="watchlist-items" id="watchlist-items"></div>
+                <div class="watchlist-empty" id="watchlist-empty">Save stocks with the ☆ button to follow them here.</div>
+              </section>
+              <section class="panel planner-panel" id="risk-planner">
+                <div class="panel-heading compact-heading"><div><p class="eyebrow">PLAN YOUR RISK</p><h2>Position planner</h2></div><span class="planner-symbol" aria-hidden="true">◈</span></div>
+                <p class="panel-description">Estimate a position size using a hypothetical risk limit.</p>
+                <form id="planner-form" class="planner-form">
+                  <label>Account value <span class="input-with-prefix"><span>₹</span><input id="account-value" type="number" min="1" step="100" value="100000" required></span></label>
+                  <label>Risk per idea <span class="input-with-suffix"><input id="risk-percent" type="number" min="0.1" max="5" step="0.1" value="1" required><span>%</span></span></label>
+                  <label>Entry price <span class="input-with-prefix"><span>₹</span><input id="entry-price" type="number" min="0.01" step="0.05" value="1000" required></span></label>
+                  <label>Stop price <span class="input-with-prefix"><span>₹</span><input id="stop-price" type="number" min="0.01" step="0.05" value="950" required></span></label>
+                  <div class="planner-result"><span>Estimated max shares</span><strong id="shares-result">20 shares</strong><small id="risk-result">About ₹1,000 at risk if the stop is reached</small></div>
+                  <button class="button button-secondary" type="submit">Update estimate <span aria-hidden="true">→</span></button>
+                </form>
+                <p class="fine-print">Estimate only; gaps, fees, taxes, and slippage may change actual losses. This does not check available funds.</p>
+              </section>
+              <section class="panel order-panel" id="order-ticket">
+                <div class="panel-heading compact-heading"><div><p class="eyebrow">MANUAL ONLY</p><h2>Limit order ticket</h2></div><span class="planner-symbol" aria-hidden="true">₹</span></div>
+                <p class="panel-description">Real CNC delivery orders. Review every detail and confirm explicitly before sending to Zerodha.</p>
+                <form id="order-form" class="order-form">
+                  <label>Equity (exchange:symbol) <input id="order-symbol" list="instrument-options" placeholder="NSE:RELIANCE" required disabled></label>
+                  <label>Action <select id="order-side"><option value="BUY">Buy</option><option value="SELL">Sell</option></select></label>
+                  <label>Quantity (shares) <input id="order-quantity" type="number" min="1" max="10000" step="1" value="1" required disabled></label>
+                  <label>Limit price <span class="input-with-prefix"><span>₹</span><input id="order-price" type="number" min="0.01" step="0.05" placeholder="Enter limit price" required disabled></span></label>
+                  <button class="button button-primary" id="preview-order" type="submit" disabled>Review order</button>
+                </form>
+                <p class="fine-print">Limit / CNC / DAY only. No market orders, intraday leverage, derivatives, or automatic execution.</p>
+                <div class="order-result hidden" id="order-result" role="status"></div>
+              </section>
+            </aside>
+          </section>
+
+          <section class="panel strategy-panel" id="strategy-lab">
+            <div class="panel-heading">
+              <div><p class="eyebrow">TEST BEFORE REAL CAPITAL</p><h2>Strategy lab</h2></div>
+              <span class="paper-badge">PAPER TRADING ONLY</span>
+            </div>
+            <p class="panel-description">Use historical daily candles to inspect a moving-average/RSI rule and simulate it against live quotes. Paper orders never reach Zerodha; past results do not predict future returns.</p>
+            <div class="strategy-grid">
+              <section class="strategy-card">
+                <h3>Automated paper portfolio</h3>
+                <p>Simulates entries and exits from your watchlist. The bot pauses if the configured drawdown guard is breached.</p>
+                <form id="paper-form" class="paper-form">
+                  <label>Starting paper cash (₹)<input id="paper-capital" type="number" min="1000" max="100000000" step="1000" value="100000" required></label>
+                  <label>Max risk / trade (%)<input id="paper-risk" type="number" min="0.1" max="1" step="0.1" value="0.5" required></label>
+                  <label>Max capital / position (%)<input id="paper-allocation" type="number" min="1" max="20" step="1" value="10" required></label>
+                  <label>Max drawdown before pause (%)<input id="paper-drawdown" type="number" min="1" max="20" step="1" value="5" required></label>
+                  <div class="paper-controls"><button class="button button-primary" id="paper-toggle" type="button" disabled>Start paper simulation</button><button class="button button-secondary" id="paper-reset" type="button">Reset paper portfolio</button></div>
+                </form>
+                <div class="paper-summary">
+                  <div><span>Paper equity</span><strong id="paper-equity">₹100,000.00</strong></div>
+                  <div><span>Cash</span><strong id="paper-cash">₹100,000.00</strong></div>
+                  <div><span>Open P&amp;L</span><strong id="paper-pnl">₹0.00</strong></div>
+                  <div><span>Peak drawdown</span><strong id="paper-dd">0.00%</strong></div>
+                </div>
+                <div class="paper-status" id="paper-status">Connect and add equities to your watchlist to enable the paper simulator.</div>
+                <div class="paper-positions" id="paper-positions"></div>
+              </section>
+              <section class="strategy-card">
+                <h3>Historical strategy check</h3>
+                <p>Choose a watchlist equity. Uses daily history, a 1% risk budget, 1.5 ATR stop, and 2R target; excludes fees, taxes, and slippage.</p>
+                <form id="backtest-form" class="backtest-form">
+                  <label>Watchlist equity <select id="backtest-symbol"></select></label>
+                  <label>Simulation capital (₹)<input id="backtest-capital" type="number" min="1000" max="100000000" step="1000" value="100000" required></label>
+                  <button class="button button-secondary" type="submit" id="run-backtest" disabled>Run historical check</button>
+                </form>
+                <div class="backtest-results hidden" id="backtest-results"></div>
+                <div class="empty-state" id="backtest-empty">Connect Zerodha and run a historical check for a watchlist equity.</div>
+              </section>
+            </div>
+            <p class="fine-print strategy-disclaimer">No strategy can guarantee profits or prevent losses. Automated execution is paper-only; real orders remain manual and require explicit confirmation.</p>
+          </section>
+
+          <section class="panel alerts-panel" id="alerts">
+            <div class="panel-heading">
+              <div><p class="eyebrow">STAY INFORMED</p><h2>Price alerts</h2></div>
+              <button class="button button-secondary button-small" id="create-alert-inline">＋ New alert</button>
+            </div>
+            <div class="alerts-content" id="alerts-content"></div>
+            <div class="alerts-empty hidden" id="alerts-empty"><span aria-hidden="true">♧</span><strong>No alerts yet</strong><p>Create an alert to keep an eye on a sample price level.</p><button class="text-link" id="create-alert-empty">Set your first alert →</button></div>
+          </section>
+
+          <footer class="page-footer">
+            <span>MarketLens <span class="footer-divider">·</span> Local trading assistant</span>
+            <span>Market analysis is informational, not investment advice. Paper bot only; real orders require confirmation.</span>
+          </footer>
+        </div>
+      </main>
+    </div>
+
+    <dialog id="alert-dialog" class="modal">
+      <form method="dialog" class="modal-close-form"><button class="modal-close" aria-label="Close dialog">×</button></form>
+      <div class="modal-content">
+        <p class="eyebrow">PRICE TRACKING</p>
+        <h2>Create a price alert</h2>
+        <p class="modal-description">Alerts are stored in this browser and checked against the live stream while this app is open. They do not execute trades.</p>
+        <form id="alert-form">
+          <label for="alert-symbol">Stock</label>
+          <input id="alert-symbol" list="instrument-options" placeholder="NSE:RELIANCE" required>
+          <label for="alert-condition">Notify me when price goes</label>
+          <select id="alert-condition"><option value="above">Above</option><option value="below">Below</option></select>
+          <label for="alert-price">Target price</label>
+          <span class="input-with-prefix modal-price"><span>₹</span><input id="alert-price" type="number" min="0.01" step="0.05" placeholder="Enter target price" required></span>
+          <p class="form-error hidden" id="alert-error" role="alert"></p>
+          <div class="modal-actions"><button class="button button-secondary" type="button" id="cancel-alert">Cancel</button><button class="button button-primary" type="submit">Save alert</button></div>
+        </form>
+      </div>
+    </dialog>
+    <datalist id="instrument-options"></datalist>
+
+    <dialog id="confirm-order-dialog" class="modal">
+      <form method="dialog" class="modal-close-form"><button class="modal-close" aria-label="Close dialog">×</button></form>
+      <div class="modal-content">
+        <p class="eyebrow">FINAL ORDER REVIEW</p>
+        <h2>Confirm this real order</h2>
+        <p class="modal-description">This will submit a real limit order to your Zerodha account. Orders can execute immediately or remain pending. MarketLens cannot guarantee a fill or a profit.</p>
+        <div class="order-review" id="order-review"></div>
+        <label class="confirm-check"><input id="confirm-order-checkbox" type="checkbox"> I reviewed the side, stock, quantity and limit price. I understand this sends a real order.</label>
+        <label for="confirm-order-text">Type <strong>PLACE ORDER</strong> to continue</label>
+        <input id="confirm-order-text" autocomplete="off" placeholder="PLACE ORDER">
+        <p class="form-error hidden" id="order-error" role="alert"></p>
+        <div class="modal-actions"><button class="button button-secondary" type="button" id="cancel-order">Cancel</button><button class="button button-primary" type="button" id="confirm-order-button" disabled>Submit real order</button></div>
+      </div>
+    </dialog>
+
+    <dialog id="analysis-dialog" class="modal analysis-modal">
+      <form method="dialog" class="modal-close-form"><button class="modal-close" aria-label="Close dialog">×</button></form>
+      <div class="modal-content" id="analysis-content"></div>
+    </dialog>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
