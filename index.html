@@ -42,6 +42,7 @@
             <span class="market-date" id="market-date"></span>
             <button class="icon-button" id="help-button" aria-label="About this dashboard" title="About this dashboard">?</button>
             <span class="account-name hidden" id="account-name"></span>
+            <button class="button button-secondary button-small hidden" id="change-setup-button">Change API setup</button>
             <button class="button button-secondary button-small" id="connect-button">Connect Zerodha</button>
             <button class="button button-secondary button-small hidden" id="logout-button">Disconnect</button>
           </div>
@@ -92,6 +93,37 @@
             </div>
 
             <aside class="right-column">
+              <section class="panel market-scan-panel">
+                <div class="panel-heading compact-heading"><div><p class="eyebrow">ROTATING NSE / BSE SCAN</p><h2>Market candidates</h2></div><button class="text-link" id="scan-toggle" disabled>Pause</button></div>
+                <p class="panel-description">Daily and 5-minute matches: close above SMA 20 above SMA 50, with RSI 45–70. A rotating scan across available equity instruments is not a real-time or complete market view.</p>
+                <div id="scan-status" class="account-updated" role="status">Connect Zerodha to start the scan.</div>
+                <div id="scan-content" aria-live="polite"></div>
+                <p class="fine-print">Example entry = completed candle close; sell target = close + 3 ATR; stop = close − 1.5 ATR. Prices are not live order recommendations and may be stale. Targets may never be reached; gaps, liquidity, fees and taxes can cause losses. Verify the instrument and current price before any order. The scan continues on the server while connected; use Pause to stop it.</p>
+              </section>
+              <section class="panel" id="jio-review">
+                <div class="panel-heading compact-heading"><div><p class="eyebrow">JIO · DAILY RULE REVIEW</p><h2>Jio stocks</h2></div><button class="text-link" id="refresh-jio" disabled>Refresh</button></div>
+                <p class="panel-description">Automatic daily-candle checks for Jio Platforms and Jio Financial Services.</p>
+                <div id="jio-status" class="account-updated" role="status">Connect Zerodha to load analysis.</div>
+                <div id="jio-content" aria-live="polite"></div>
+                <p class="fine-print">Rules and targets are hypothetical, not investment advice or a guarantee. Data can be delayed; orders require separate confirmation.</p>
+                <div class="funds-actions"><a href="https://www.jio.com/about/investor-relations/financials/financials-results/" target="_blank" rel="noopener noreferrer">Jio Platforms official financial results <span aria-hidden="true">↗</span></a><a href="https://www.jfs.in/financials/" target="_blank" rel="noopener noreferrer">Jio Financial Services official financials <span aria-hidden="true">↗</span></a></div>
+                <div class="research-panel">
+                  <h3>Public filing research</h3>
+                  <p>Search selected official Q2 FY2026-27 filings, not necessarily the latest. AI summaries are optional and can be incorrect.</p>
+                  <label for="research-symbol">Company</label>
+                  <select id="research-symbol"><option value="NSE:JPL">Jio Platforms</option><option value="NSE:JIOFIN">Jio Financial Services</option></select>
+                  <div class="research-actions"><button class="button button-secondary" id="research-evidence" type="button">Retrieve evidence</button><button class="button button-secondary" id="research-generate" type="button">Generate AI summary</button></div>
+                  <p>AI summary uses the configured provider. With OpenAI or auto fallback, selected public filing excerpts are sent to OpenAI; no account or market data is included. Charges may apply.</p>
+                  <div id="research-result" role="status" aria-live="polite"></div>
+                </div>
+              </section>
+              <section class="panel ideas-panel" id="trade-ideas">
+                <div class="panel-heading compact-heading"><div><p class="eyebrow">DAILY RULES · NOT ADVICE</p><h2>Buy / sell watch</h2></div><button class="text-link" id="refresh-ideas" disabled>Refresh</button></div>
+                <p class="panel-description">Watchlist entries and Zerodha holdings, based on the last completed daily candle.</p>
+                <div id="ideas-status" class="account-updated" role="status">Connect Zerodha to load daily analysis.</div>
+                <div id="ideas-content" aria-live="polite"></div>
+                <p class="fine-print">Buy rule: close &gt; SMA 20 &gt; SMA 50 and RSI 45–70. Sell review: close &lt; SMA 20 or RSI &gt; 75. Illustrative target = daily close + 3 ATR; stop = close − 1.5 ATR. Neither is a forecast or an order. Targets are not tied to your holding's purchase price. No profit is guaranteed; prices, fees and execution can differ. Verify holdings and all orders in Zerodha.</p>
+              </section>
               <section class="panel account-panel" id="account">
                 <div class="panel-heading compact-heading"><div><p class="eyebrow">READ ONLY · ZERODHA</p><h2>Account snapshot</h2></div><button class="text-link" id="refresh-account">Refresh</button></div>
                 <p class="account-updated" id="account-updated">Connect Zerodha to retrieve account details.</p>
@@ -204,6 +236,24 @@
         </div>
       </main>
     </div>
+
+    <dialog id="setup-dialog" class="modal">
+      <form method="dialog" class="modal-close-form"><button class="modal-close" aria-label="Close setup">×</button></form>
+      <div class="modal-content">
+        <p class="eyebrow">LOCAL KITE CONNECT SETUP</p>
+        <h2>Set up Kite API</h2>
+        <p class="modal-description">Create a Kite Connect developer app on <a href="https://developers.kite.trade/" target="_blank" rel="noopener noreferrer">Zerodha's developer site</a>. Register this exact redirect URL in that app: <strong id="setup-redirect"></strong></p>
+        <p class="modal-description">Enter your developer app API key and API secret below, not your Zerodha login password. They stay in this server's memory until it restarts and are not written to a file. Other local users may be able to access this app.</p>
+        <form id="setup-form" autocomplete="off">
+          <label for="setup-api-key">Kite Connect API key</label>
+          <input id="setup-api-key" type="text" autocomplete="off" spellcheck="false" maxlength="256" required>
+          <label for="setup-api-secret">Kite Connect API secret</label>
+          <input id="setup-api-secret" type="password" autocomplete="off" spellcheck="false" maxlength="256" required>
+          <p class="form-error hidden" id="setup-error" role="alert"></p>
+          <div class="modal-actions"><button class="button button-secondary" type="button" id="cancel-setup">Cancel</button><button class="button button-primary" type="submit" id="save-setup">Save for this session</button></div>
+        </form>
+      </div>
+    </dialog>
 
     <dialog id="alert-dialog" class="modal">
       <form method="dialog" class="modal-close-form"><button class="modal-close" aria-label="Close dialog">×</button></form>

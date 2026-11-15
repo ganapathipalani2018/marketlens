@@ -34,7 +34,7 @@ function oscillatingCandles(count) {
 }
 
 test("indicator analysis validates history and returns transparent trend metrics", () => {
-  assert.match(calculateIndicators(risingCandles(49)).error, /50 daily candles/);
+  assert.match(calculateIndicators(risingCandles(49)).error, /50 candles/);
   const result = calculateIndicators(risingCandles(80));
   assert.equal(result.trend, "Uptrend");
   assert.equal(result.score, 75);

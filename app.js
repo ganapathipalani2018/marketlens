@@ -1,4 +1,6 @@
 import { calculatePaperOrder, paperDrawdownReached, paperExitReason } from "./lib/paper-simulation.js";
+import { tradeIdea } from "./lib/trade-ideas.js";
+import { buildPriceChart } from "./lib/price-chart.js";
 
 const featuredKeys = [
   "NSE:RELIANCE", "NSE:TCS", "NSE:INFY", "NSE:HDFCBANK", "NSE:ICICIBANK",
@@ -40,6 +42,8 @@ let instrumentsByToken = new Map();
 let quotes = new Map();
 let analysisBySymbol = new Map();
 let analysisRequests = new Map();
+let analysisQueue = Promise.resolve();
+let lastAnalysisRequestAt = 0;
 let watchlist = localStore.read("marketlens-watchlist", ["NSE:RELIANCE", "NSE:TCS"])
   .filter(key => typeof key === "string" && key.includes(":"));
 let alerts = localStore.read("marketlens-alerts", [])
@@ -66,6 +70,24 @@ let toastTimer;
 let accountSnapshot = null;
 let activeAccountTab = "funds";
 let currentAnalysisKey = "";
+let marketSessionGeneration = 0;
+let ideasGeneration = 0;
+let ideaResults = new Map();
+let ideaErrors = new Map();
+let ideasLoading = false;
+let ideasProgress = "";
+let ideaHoldingsError = "";
+let accountRefreshing = false;
+let ideasStatusError = "";
+let marketScan = null;
+let scanError = "";
+let scanActionBusy = false;
+let scanRequestVersion = 0;
+const jioKeys = ["NSE:JPL", "NSE:JIOFIN"];
+let jioGeneration = 0;
+let jioLoading = false;
+let jioResults = new Map();
+let jioErrors = new Map();
 
 const money = value => new Intl.NumberFormat("en-IN", {
   style: "currency", currency: "INR", minimumFractionDigits: 2, maximumFractionDigits: 2
@@ -112,8 +134,9 @@ function setConnectionStatus(status, error = "") {
     label.textContent = "NOT CONNECTED";
   }
   document.getElementById("connect-button").classList.toggle("hidden", status.authenticated);
-  document.getElementById("connect-button").disabled = !status.configured;
+  document.getElementById("connect-button").disabled = false;
   document.getElementById("connect-button").textContent = status.configured ? "Connect Zerodha" : "Setup Kite API";
+  document.getElementById("change-setup-button").classList.toggle("hidden", !status.configured || status.authenticated);
   document.getElementById("logout-button").classList.toggle("hidden", !status.authenticated);
   document.getElementById("account-name").classList.toggle("hidden", !status.profile?.name);
   document.getElementById("account-name").textContent = status.profile?.name || "";
@@ -180,6 +203,207 @@ function renderWatchlist() {
   }).join("");
   renderBacktestOptions();
   renderPaper();
+}
+
+function renderJio() {
+  const status = document.getElementById("jio-status");
+  const content = document.getElementById("jio-content");
+  document.getElementById("refresh-jio").disabled = !appStatus.authenticated || jioLoading || Boolean(ideasStatusError);
+  if (ideasStatusError || !appStatus.authenticated) {
+    status.textContent = ideasStatusError ? `Connection status unavailable: ${ideasStatusError}` : "Connect Zerodha to load analysis.";
+    content.innerHTML = "";
+    return;
+  }
+  status.textContent = jioLoading ? "Loading completed daily candles…" : jioErrors.size
+    ? "Some analysis is unavailable; see details below." : "Daily rule analysis loaded; refresh for updates.";
+  content.innerHTML = jioKeys.map(key => {
+    const result = jioResults.get(key);
+    const error = jioErrors.get(key);
+    const summary = error || (!result ? "Waiting for analysis" :
+      `${result.buyCondition ? "Buy rule met" : "Buy rule not met"} · ${result.sellCondition ? "Sell review rule met" : "Sell review rule not met"}`);
+    const details = result ? `<div class="idea-details">Daily close ${money(result.close)} · ${escapeHtml(result.date)}<br>${result.targetPrice === null
+      ? "Hypothetical levels unavailable: stop would be non-positive."
+      : `Example target ${money(result.targetPrice)} · stop ${money(result.stopPrice)}`}</div>` : "";
+    const button = instrumentsByKey.get(key)?.isEquity
+      ? `<button class="text-link" data-jio-analysis="${escapeHtml(key)}">View chart and analysis</button>` : "";
+    return `<div class="idea-row"><div class="idea-heading"><strong>${escapeHtml(key)}</strong></div><div>${escapeHtml(summary)}</div>${details}${button}</div>`;
+  }).join("");
+}
+
+async function refreshJio() {
+  const generation = ++jioGeneration;
+  jioResults = new Map();
+  jioErrors = new Map();
+  if (!appStatus.authenticated || ideasStatusError) {
+    jioLoading = false;
+    renderJio();
+    return;
+  }
+  jioLoading = true;
+  renderJio();
+  for (const [index, key] of jioKeys.entries()) {
+    if (index) await new Promise(resolve => window.setTimeout(resolve, 400));
+    if (generation !== jioGeneration || !appStatus.authenticated) return;
+    if (!instrumentsByKey.get(key)?.isEquity) {
+      jioErrors.set(key, "Not available in Zerodha's current NSE equity list.");
+      continue;
+    }
+    try {
+      const data = await fetchAnalysis(key);
+      if (generation !== jioGeneration || !appStatus.authenticated) return;
+      const result = tradeIdea(data.indicators);
+      if (result.error) jioErrors.set(key, result.error);
+      else jioResults.set(key, result);
+    } catch (error) {
+      if (generation !== jioGeneration || !appStatus.authenticated) return;
+      jioErrors.set(key, error.message);
+    }
+  }
+  if (generation !== jioGeneration || !appStatus.authenticated) return;
+  jioLoading = false;
+  renderJio();
+}
+
+function ideaHoldingKeys() {
+  if (ideaHoldingsError || !accountSnapshot?.holdings) return [];
+  return [...new Set(accountSnapshot.holdings
+    .filter(item => item.quantity > 0 || item.t1Quantity > 0)
+    .map(item => `${item.exchange}:${item.symbol}`))];
+}
+
+function renderMarketScan() {
+  const status = document.getElementById("scan-status");
+  const content = document.getElementById("scan-content");
+  const toggle = document.getElementById("scan-toggle");
+  toggle.disabled = !appStatus.authenticated || !marketScan || scanActionBusy || !marketScan.total;
+  toggle.textContent = marketScan?.running ? "Pause" : "Resume";
+  if (!appStatus.authenticated) {
+    status.textContent = "Connect Zerodha to start the scan.";
+    content.innerHTML = "";
+    return;
+  }
+  if (scanError || !marketScan) {
+    status.textContent = scanError ? `Market scan unavailable: ${scanError}` : "Loading market scan…";
+    content.innerHTML = "";
+    return;
+  }
+  const state = marketScan.running ? "Scanning" : "Paused";
+  status.textContent = `${state}: ${marketScan.completed}/${marketScan.total} instruments in cycle ${marketScan.cycle + 1}; ${marketScan.unavailable} unavailable timeframe(s).${marketScan.current ? ` Checking ${marketScan.current}.` : ""}${marketScan.error ? ` ${marketScan.error}` : ""}${marketScan.lastIssue ? ` Latest issue: ${marketScan.lastIssue}` : ""}`;
+  const section = (title, items, interval) => {
+    const cards = items.map(item => {
+      const candleTime = Date.parse(item.date);
+      const stale = !Number.isFinite(candleTime) || Date.now() - candleTime > (interval === "5minute" ? 20 * 60000 : 4 * 86400000);
+      const candleLabel = interval === "day" ? item.date :
+        new Date(candleTime).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) + " IST";
+      const scanTime = new Date(item.scannedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+      return `<div class="scan-candidate${stale ? " stale" : ""}"><strong>${escapeHtml(item.symbol)}</strong> · ${stale ? "Old candle; verify current data" : "Rule matched"}
+        <div>Example entry ${money(item.close)} · example sell target ${money(item.targetPrice)} · stop ${money(item.stopPrice)}</div>
+        <div>Candle: ${escapeHtml(candleLabel)} · scanned ${escapeHtml(scanTime)} IST</div>
+        <button class="text-link" data-scan-order="${escapeHtml(item.symbol)}">Review buy order</button></div>`;
+    }).join("");
+    return `<h3 class="ideas-section-title">${title}</h3>${cards || '<p class="account-empty">No matches found in the scanned instruments yet.</p>'}`;
+  };
+  content.innerHTML = section("Daily · latest matches", marketScan.candidates.day, "day") +
+    section("5-minute · latest matches", marketScan.candidates["5minute"], "5minute");
+}
+
+async function refreshMarketScan() {
+  if (!appStatus.authenticated || scanActionBusy) return;
+  const version = ++scanRequestVersion;
+  const session = marketSessionGeneration;
+  try {
+    const result = await requestJson("/api/market-scan");
+    if (version !== scanRequestVersion || session !== marketSessionGeneration || !appStatus.authenticated) return;
+    marketScan = result;
+    scanError = "";
+  } catch (error) {
+    if (version !== scanRequestVersion || session !== marketSessionGeneration || !appStatus.authenticated) return;
+    scanError = error.message;
+  }
+  renderMarketScan();
+}
+
+function renderIdeas() {
+  const status = document.getElementById("ideas-status");
+  const content = document.getElementById("ideas-content");
+  const refresh = document.getElementById("refresh-ideas");
+  refresh.disabled = !appStatus.authenticated || ideasLoading || accountRefreshing || Boolean(ideasStatusError);
+  if (ideasStatusError) {
+    status.textContent = `Connection status unavailable: ${ideasStatusError}`;
+    content.innerHTML = "";
+    return;
+  }
+  if (!appStatus.authenticated) {
+    status.textContent = "Connect Zerodha to load daily analysis.";
+    content.innerHTML = "";
+    return;
+  }
+  status.textContent = ideasLoading ? `Analyzing ${ideasProgress}…` : ideaErrors.size
+    ? `Analysis completed with ${ideaErrors.size} unavailable symbol(s). Refresh to retry.`
+    : "Daily analysis complete. Refresh to update.";
+  const row = (key, side) => {
+    const result = ideaResults.get(key);
+    const error = ideaErrors.get(key);
+    const signal = side === "BUY" ? result?.buyCondition : result?.sellCondition;
+    const description = error || (!result ? (ideasLoading ? "Waiting for analysis" : "Not analyzed") :
+      side === "BUY" ? (signal ? "Buy rule met" : "Buy rule not met") :
+        (signal ? "Sell review rule met" : "Sell review rule not met"));
+    const levels = result ? `<div class="idea-details">Daily close ${money(result.close)} · ${escapeHtml(result.date)}<br>${result.targetPrice === null
+      ? "Hypothetical levels unavailable: stop would be non-positive."
+      : `Example target ${money(result.targetPrice)} · stop ${money(result.stopPrice)}`}</div>` : "";
+    const button = signal ? `<button class="text-link" data-idea-order="${escapeHtml(key)}" data-idea-side="${side}">Review ${side.toLowerCase()} order</button>` : "";
+    return `<div class="idea-row"><div class="idea-heading"><strong>${escapeHtml(key)}</strong><span class="idea-status ${signal ? (side === "BUY" ? "positive" : "negative") : ""}">${escapeHtml(description)}</span></div>${levels}${button}</div>`;
+  };
+  const watchKeys = [...new Set(watchlist)];
+  const holdingKeys = ideaHoldingKeys();
+  const holdingsMessage = ideaHoldingsError
+    ? `<p class="account-error">Holdings unavailable: ${escapeHtml(ideaHoldingsError)}</p>`
+    : !accountSnapshot?.holdings ? '<p class="account-empty">Refresh the account snapshot to load holdings.</p>'
+      : !holdingKeys.length ? '<p class="account-empty">No positive delivery holdings returned by Zerodha.</p>' : "";
+  const snapshotTime = accountSnapshot?.fetchedAt && !ideaHoldingsError
+    ? `<p class="account-updated">Holdings snapshot: ${escapeHtml(new Date(accountSnapshot.fetchedAt).toLocaleString())}. T+1 shares may not be sellable.</p>` : "";
+  content.innerHTML = `<h3 class="ideas-section-title">Buy watchlist</h3>${watchKeys.length
+    ? watchKeys.map(key => row(key, "BUY")).join("") : '<p class="account-empty">Add equities to your watchlist.</p>'}
+    <h3 class="ideas-section-title">Sell review · holdings</h3>${snapshotTime}${holdingsMessage}${holdingKeys.map(key => row(key, "SELL")).join("")}`;
+}
+
+async function refreshIdeas() {
+  const generation = ++ideasGeneration;
+  ideaResults = new Map();
+  ideaErrors = new Map();
+  if (!appStatus.authenticated) {
+    ideasLoading = false;
+    renderIdeas();
+    return;
+  }
+  const keys = [...new Set([...watchlist, ...ideaHoldingKeys()])];
+  ideasLoading = true;
+  ideasProgress = `0/${keys.length}`;
+  renderIdeas();
+  for (let index = 0; index < keys.length; index += 1) {
+    if (index > 0) await new Promise(resolve => window.setTimeout(resolve, 400));
+    if (generation !== ideasGeneration || !appStatus.authenticated) return;
+    const key = keys[index];
+    ideasProgress = `${index + 1}/${keys.length}`;
+    renderIdeas();
+    if (!instrumentsByKey.get(key)?.isEquity) {
+      ideaErrors.set(key, "Equity not available in the current instrument list.");
+      continue;
+    }
+    try {
+      const data = await fetchAnalysis(key);
+      if (generation !== ideasGeneration || !appStatus.authenticated) return;
+      const result = tradeIdea(data.indicators);
+      if (result.error) ideaErrors.set(key, result.error);
+      else ideaResults.set(key, result);
+    } catch (error) {
+      if (generation !== ideasGeneration || !appStatus.authenticated) return;
+      ideaErrors.set(key, error.message);
+    }
+  }
+  if (generation !== ideasGeneration || !appStatus.authenticated) return;
+  ideasLoading = false;
+  renderIdeas();
 }
 
 function renderAlerts() {
@@ -387,13 +611,21 @@ async function refreshAccount() {
     showToast("Connect Zerodha to view available equity funds.");
     return;
   }
+  if (accountRefreshing) return;
+  accountRefreshing = true;
   const refreshButton = document.getElementById("refresh-account");
+  const sessionGeneration = marketSessionGeneration;
   refreshButton.disabled = true;
   refreshButton.textContent = "Refreshing…";
+  renderIdeas();
   if (!accountSnapshot) renderAccount();
   try {
-    accountSnapshot = await requestJson("/api/account");
+    const snapshot = await requestJson("/api/account");
+    if (sessionGeneration !== marketSessionGeneration || !appStatus.authenticated) return;
+    accountSnapshot = snapshot;
+    ideaHoldingsError = accountSnapshot.errors?.holdings || "";
     renderAccount();
+    void refreshIdeas();
     const accountValue = document.getElementById("account-value");
     const availableCash = accountSnapshot.funds?.availableCash;
     if (document.activeElement !== accountValue && availableCash > 0) {
@@ -401,6 +633,9 @@ async function refreshAccount() {
       updatePlanner();
     }
   } catch (error) {
+    if (sessionGeneration !== marketSessionGeneration || !appStatus.authenticated) return;
+    ideaHoldingsError = error.message;
+    void refreshIdeas();
     document.getElementById("account-updated").textContent = `Account refresh failed: ${error.message}`;
     if (!accountSnapshot) {
       document.getElementById("account-tab-content").innerHTML =
@@ -408,21 +643,39 @@ async function refreshAccount() {
     }
     showToast(`Could not load account information: ${error.message}`);
   } finally {
+    accountRefreshing = false;
     refreshButton.disabled = false;
     refreshButton.textContent = "Refresh";
+    renderIdeas();
   }
 }
 
 async function fetchAnalysis(key, capital = 100000) {
   const requestKey = `${key}|${capital}`;
   if (analysisRequests.has(requestKey)) return analysisRequests.get(requestKey);
-  const request = requestJson(`/api/analysis?symbol=${encodeURIComponent(key)}&capital=${encodeURIComponent(capital)}`)
+  const sessionGeneration = marketSessionGeneration;
+  const queued = analysisQueue.then(async () => {
+    const wait = Math.max(0, 400 - (Date.now() - lastAnalysisRequestAt));
+    if (wait) await new Promise(resolve => window.setTimeout(resolve, wait));
+    if (sessionGeneration !== marketSessionGeneration || !appStatus.authenticated) {
+      throw new Error("Zerodha session changed during analysis.");
+    }
+    lastAnalysisRequestAt = Date.now();
+    return requestJson(`/api/analysis?symbol=${encodeURIComponent(key)}&capital=${encodeURIComponent(capital)}`);
+  });
+  analysisQueue = queued.then(() => undefined, () => undefined);
+  const request = queued
     .then(data => {
+      if (sessionGeneration !== marketSessionGeneration || !appStatus.authenticated) {
+        throw new Error("Zerodha session changed during analysis.");
+      }
       analysisBySymbol.set(key, data);
       renderStocks();
       return data;
     })
-    .finally(() => analysisRequests.delete(requestKey));
+    .finally(() => {
+      if (analysisRequests.get(requestKey) === request) analysisRequests.delete(requestKey);
+    });
   analysisRequests.set(requestKey, request);
   return request;
 }
@@ -722,6 +975,8 @@ async function loadAuthenticatedData() {
   renderAccount();
   updateOrderControls();
   connectMarketSocket();
+  void refreshMarketScan();
+  void refreshJio();
   await refreshAccount();
 
   const quoteKeys = [...new Set([
@@ -748,6 +1003,9 @@ async function refreshStatus() {
   try {
     const previousAuth = appStatus.authenticated;
     appStatus = await requestJson("/api/status");
+    const recoveringIdeas = Boolean(ideasStatusError);
+    ideasStatusError = "";
+    if (previousAuth !== appStatus.authenticated) marketSessionGeneration += 1;
     setConnectionStatus(appStatus, appStatus.error || "");
     if (appStatus.authenticated && (!previousAuth || !instruments.length)) {
       await loadAuthenticatedData();
@@ -759,18 +1017,39 @@ async function refreshStatus() {
       analysisBySymbol.clear();
       analysisRequests.clear();
       accountSnapshot = null;
+      ideaHoldingsError = "";
+      marketScan = null;
+      scanError = "";
+      scanRequestVersion += 1;
+      renderMarketScan();
+      void refreshIdeas();
+      void refreshJio();
       renderStocks();
       renderWatchlist();
       renderAlerts();
       renderIndexCards();
       renderAccount();
+      renderIdeas();
       updateOrderControls();
+    } else if (recoveringIdeas && appStatus.authenticated) {
+      void refreshAccount();
+      void refreshJio();
+    } else if (recoveringIdeas) {
+      renderIdeas();
+      renderJio();
     }
     if (!appStatus.authenticated && !appStatus.configured) {
       document.getElementById("quote-foot").textContent = "Set up a Kite Connect app and local credentials to load live data.";
     }
     renderPaper();
   } catch (error) {
+    ideasGeneration += 1;
+    ideasLoading = false;
+    ideasStatusError = error.message;
+    renderIdeas();
+    jioGeneration += 1;
+    jioLoading = false;
+    renderJio();
     setConnectionStatus({ configured: false, authenticated: false, connected: false }, error.message);
     renderPaper();
   }
@@ -807,6 +1086,29 @@ function openAnalysis(key) {
   });
 }
 
+function renderPriceChart(data) {
+  const chart = buildPriceChart(data.candles, data.backtest);
+  if (chart.error) return `<p class="analysis-error">${escapeHtml(chart.error)}</p>`;
+  const left = 60, right = 480, top = 20, bottom = 200;
+  const x = index => left + index / (chart.points.length - 1) * (right - left);
+  const y = value => bottom - (value - chart.min) / (chart.max - chart.min) * (bottom - top);
+  const line = field => chart.points.map((point, index) =>
+    Number.isFinite(point[field]) ? `${x(index).toFixed(1)},${y(point[field]).toFixed(1)}` : "").filter(Boolean).join(" ");
+  const marker = item => `<circle cx="${x(item.index).toFixed(1)}" cy="${y(item.price).toFixed(1)}" r="4" fill="${item.side === "buy" ? "#128765" : "#c34659"}"><title>Simulated ${item.side} ${escapeHtml(item.date)} at ${escapeHtml(money(item.price))}</title></circle>`;
+  return `<figure class="chart-wrap">
+    <svg viewBox="0 0 500 235" role="img" aria-label="Daily closing prices with 20 and 50 day moving averages and historical simulated trade markers">
+      <line x1="${left}" y1="${top}" x2="${left}" y2="${bottom}" stroke="#cdd4e0"/><line x1="${left}" y1="${bottom}" x2="${right}" y2="${bottom}" stroke="#cdd4e0"/>
+      <text x="0" y="${top + 4}">${escapeHtml(money(chart.max))}</text><text x="0" y="${bottom}">${escapeHtml(money(chart.min))}</text>
+      <polyline fill="none" stroke="#4867db" stroke-width="2" points="${line("close")}"/>
+      <polyline fill="none" stroke="#dd9c28" stroke-width="1.5" points="${line("sma20")}"/>
+      <polyline fill="none" stroke="#8c63c7" stroke-width="1.5" points="${line("sma50")}"/>
+      ${chart.markers.map(marker).join("")}
+      <text x="${left}" y="223">${escapeHtml(chart.points[0].date)}</text><text x="${right}" y="223" text-anchor="end">${escapeHtml(chart.points.at(-1).date)}</text>
+    </svg>
+    <figcaption class="chart-caption">Blue: daily close · orange: SMA 20 · purple: SMA 50. Green/red dots: historical simulated buy/sell fills, not real trades or future signals. Shows up to 90 completed daily candles. Past results do not predict returns.</figcaption>
+  </figure>`;
+}
+
 function renderAnalysisHtml(key, analysisData, analysisMessage) {
   const instrument = instrumentsByKey.get(key);
   if (!instrument) return "";
@@ -840,7 +1142,7 @@ function renderAnalysisHtml(key, analysisData, analysisMessage) {
       <div class="analysis-stat"><span>Day high / low</span><strong>${quote?.ohlc ? `${money(quote.ohlc.high)} / ${money(quote.ohlc.low)}` : "—"}</strong></div>
       <div class="analysis-stat"><span>Volume</span><strong>${quote?.volume ? Number(quote.volume).toLocaleString("en-IN") : "—"}</strong></div>
     </div>
-    ${signalSection}${statusMessage}
+    ${analysisData ? renderPriceChart(analysisData) : ""}${signalSection}${statusMessage}
     <div class="analysis-warning"><strong>Risk notice:</strong> Live market quotes are not guaranteed execution prices. Prices can move, orders can be rejected or partially filled, and you can lose money. Use the broker's order book to verify any submitted order.</div>
     <div class="analysis-actions"><button class="button button-secondary" data-modal-watch="${escapeHtml(key)}">${watchlist.includes(key) ? "★ In watchlist" : "☆ Add to watchlist"}</button><button class="button button-secondary" data-modal-alert="${escapeHtml(key)}">＋ Set price alert</button><button class="button button-secondary" data-modal-backtest="${escapeHtml(key)}">Run backtest</button><button class="button button-primary" data-modal-order="${escapeHtml(key)}">Review order</button></div>`;
 }
@@ -859,16 +1161,57 @@ renderWatchlist();
 renderAlerts();
 renderIndexCards();
 renderAccount();
+renderJio();
 updatePlanner();
 refreshStatus();
 window.setInterval(refreshStatus, 20000);
+window.setInterval(() => void refreshMarketScan(), 15000);
+window.setInterval(() => { if (!jioLoading && appStatus.authenticated && !ideasStatusError) void refreshJio(); }, 15 * 60 * 1000);
+
+function openSetup() {
+  document.getElementById("setup-redirect").textContent = `${location.origin}/auth/kite/callback`;
+  document.getElementById("setup-error").classList.add("hidden");
+  document.getElementById("setup-dialog").showModal();
+}
 
 document.getElementById("connect-button").addEventListener("click", () => {
   if (!appStatus.configured) {
-    showToast("Copy .env.example to .env, add your Kite API credentials, and restart the app.");
+    openSetup();
     return;
   }
   location.assign("/api/login");
+});
+document.getElementById("change-setup-button").addEventListener("click", openSetup);
+document.getElementById("cancel-setup").addEventListener("click", () => document.getElementById("setup-dialog").close());
+document.getElementById("setup-dialog").addEventListener("close", () => {
+  document.getElementById("setup-form").reset();
+  document.getElementById("setup-error").textContent = "";
+  document.getElementById("setup-error").classList.add("hidden");
+});
+document.getElementById("setup-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = document.getElementById("save-setup");
+  const errorNode = document.getElementById("setup-error");
+  button.disabled = true;
+  errorNode.classList.add("hidden");
+  try {
+    await requestJson("/api/setup", {
+      method: "POST",
+      body: JSON.stringify({
+        apiKey: document.getElementById("setup-api-key").value,
+        apiSecret: document.getElementById("setup-api-secret").value
+      })
+    });
+    document.getElementById("setup-dialog").close();
+    appStatus.configured = true;
+    setConnectionStatus(appStatus);
+    showToast("API setup saved for this session. Select Connect Zerodha to sign in.");
+  } catch (error) {
+    errorNode.textContent = error.message;
+    errorNode.classList.remove("hidden");
+  } finally {
+    button.disabled = false;
+  }
 });
 document.getElementById("logout-button").addEventListener("click", async () => {
   try {
@@ -882,6 +1225,86 @@ document.getElementById("logout-button").addEventListener("click", async () => {
 document.getElementById("stock-search").addEventListener("input", renderStocks);
 document.getElementById("signal-filter").addEventListener("change", renderStocks);
 document.getElementById("stock-sort").addEventListener("change", renderStocks);
+document.getElementById("refresh-jio").addEventListener("click", () => void refreshJio());
+let researchSelectionVersion = 0;
+document.getElementById("research-symbol").addEventListener("change", () => {
+  researchSelectionVersion += 1;
+  document.getElementById("research-result").textContent = "";
+});
+async function runFilingResearch(generate) {
+  const buttons = [document.getElementById("research-evidence"), document.getElementById("research-generate")];
+  const result = document.getElementById("research-result");
+  const selectionVersion = researchSelectionVersion;
+  const symbol = document.getElementById("research-symbol").value;
+  buttons.forEach(button => { button.disabled = true; });
+  result.textContent = generate ? "Retrieving public evidence and generating summary…" : "Retrieving official filing evidence…";
+  try {
+    const data = await requestJson("/api/research", {
+      method: "POST",
+      body: JSON.stringify({ symbol, generate })
+    });
+    if (selectionVersion !== researchSelectionVersion) return;
+    const source = data.source;
+    result.innerHTML = `<div class="research-result"><p><strong>${escapeHtml(source.title)}</strong><br>${escapeHtml(source.period)} · retrieved ${escapeHtml(new Date(data.retrievedAt).toLocaleString())}<br><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">Open official filing</a></p>
+      ${data.warning ? `<p class="account-error">${escapeHtml(data.warning)}</p>` : ""}
+      ${data.summary ? `<p class="research-summary"><strong>AI summary (${escapeHtml(data.provider)}) · verify against sources</strong><br>${escapeHtml(data.summary)}</p>` : ""}
+      ${data.evidence.map(item => `<div class="research-evidence"><strong>[${escapeHtml(item.id)}] Page ${item.page}</strong><br>${escapeHtml(item.excerpt)}</div>`).join("")}
+      <p>Text extraction can omit table structure. Verify claims in the filing; these excerpts are not a complete analysis.</p></div>`;
+  } catch (error) {
+    if (selectionVersion === researchSelectionVersion) result.innerHTML = `<p class="account-error">${escapeHtml(error.message)}</p>`;
+  } finally {
+    buttons.forEach(button => { button.disabled = false; });
+  }
+}
+document.getElementById("research-evidence").addEventListener("click", () => void runFilingResearch(false));
+document.getElementById("research-generate").addEventListener("click", () => void runFilingResearch(true));
+document.getElementById("jio-content").addEventListener("click", event => {
+  const button = event.target.closest("[data-jio-analysis]");
+  if (button) openAnalysis(button.dataset.jioAnalysis);
+});
+document.getElementById("refresh-ideas").addEventListener("click", () => void refreshAccount());
+document.getElementById("scan-toggle").addEventListener("click", async () => {
+  if (!marketScan || scanActionBusy) return;
+  const session = marketSessionGeneration;
+  scanRequestVersion += 1;
+  scanActionBusy = true;
+  renderMarketScan();
+  try {
+    const result = await requestJson("/api/market-scan", {
+      method: "POST",
+      body: JSON.stringify({ action: marketScan.running ? "pause" : "start" })
+    });
+    if (session === marketSessionGeneration && appStatus.authenticated) {
+      marketScan = result;
+      scanError = "";
+    }
+  } catch (error) {
+    if (session === marketSessionGeneration && appStatus.authenticated) scanError = error.message;
+  } finally {
+    scanActionBusy = false;
+    renderMarketScan();
+  }
+});
+document.getElementById("scan-content").addEventListener("click", event => {
+  const button = event.target.closest("[data-scan-order]");
+  if (!button || !appStatus.authenticated) return;
+  document.getElementById("order-symbol").value = button.dataset.scanOrder;
+  document.getElementById("order-side").value = "BUY";
+  document.getElementById("order-quantity").value = "1";
+  document.getElementById("order-price").value = "";
+  document.getElementById("order-ticket").scrollIntoView({ behavior: "smooth", block: "center" });
+  document.getElementById("order-price").focus();
+});
+document.getElementById("ideas-content").addEventListener("click", event => {
+  const button = event.target.closest("[data-idea-order]");
+  if (!button || !appStatus.authenticated) return;
+  document.getElementById("order-symbol").value = button.dataset.ideaOrder;
+  document.getElementById("order-side").value = button.dataset.ideaSide;
+  document.getElementById("order-quantity").value = "1";
+  document.getElementById("order-price").value = "";
+  document.getElementById("order-ticket").scrollIntoView({ behavior: "smooth", block: "center" });
+  document.getElementById("order-price").focus();
+});
 document.getElementById("analyze-watchlist").addEventListener("click", async () => {
   const keys = watchlist.filter(key => instrumentsByKey.get(key)?.isEquity).slice(0, 10);
   if (!keys.length) {
@@ -915,6 +1338,7 @@ document.getElementById("stock-rows").addEventListener("click", event => {
     subscribeToKeys([key]);
     renderStocks();
     renderWatchlist();
+    void refreshIdeas();
   } else if (analysisButton) openAnalysis(analysisButton.dataset.analysis);
 });
 document.getElementById("watchlist-items").addEventListener("click", event => {
@@ -1050,6 +1474,7 @@ document.getElementById("analysis-content").addEventListener("click", event => {
     subscribeToKeys([key]);
     renderStocks();
     renderWatchlist();
+    void refreshIdeas();
     openAnalysis(key);
   } else if (alertButton) {
     const key = alertButton.dataset.modalAlert;
@@ -1070,6 +1495,7 @@ document.getElementById("analysis-content").addEventListener("click", event => {
       subscribeToKeys([key]);
       renderWatchlist();
       renderStocks();
+      void refreshIdeas();
     }
     document.getElementById("backtest-symbol").value = key;
     document.getElementById("strategy-lab").scrollIntoView({ behavior: "smooth", block: "start" });

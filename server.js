@@ -8,6 +8,9 @@ import { KiteConnect, KiteTicker } from "kiteconnect";
 import { WebSocket, WebSocketServer } from "ws";
 import { validateOrderRequest } from "./lib/order-validation.js";
 import { backtestTrendStrategy, calculateIndicators } from "./lib/market-analysis.js";
+import { createResearchService } from "./lib/research.js";
+import { createMarketScanner } from "./lib/market-scanner.js";
+import { historicalRange, normalizeCandles } from "./lib/historical-candles.js";
 
 dotenv.config();
 
@@ -16,18 +19,19 @@ const host = "127.0.0.1";
 const port = Number(process.env.PORT || 3000);
 const expectedRedirectUrl = `http://${host}:${port}/auth/kite/callback`;
 const redirectUrl = process.env.KITE_REDIRECT_URL || expectedRedirectUrl;
-const apiKey = process.env.KITE_API_KEY;
-const apiSecret = process.env.KITE_API_SECRET;
+let apiKey = process.env.KITE_API_KEY;
+let apiSecret = process.env.KITE_API_SECRET;
 const origin = `http://${host}:${port}`;
 const app = express();
 const httpServer = app.listen(port, host, () => {
   console.log(`MarketLens running at ${origin}`);
-  if (!apiKey || !apiSecret) console.log("Add KITE_API_KEY and KITE_API_SECRET to .env to connect Kite Connect.");
+  if (!apiKey || !apiSecret) console.log("Use Setup Kite API in MarketLens or add Kite API credentials to .env.");
 });
 const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 1024 });
 
 let kite = null;
 let ticker = null;
+let tickerReconnectTimer = null;
 let connected = false;
 let tickerError = null;
 let instruments = [];
@@ -39,9 +43,14 @@ let subscribedKeys = new Set([
 ]);
 let loginState = null;
 let loginStateExpires = 0;
+let loginInProgress = false;
 const pendingOrders = new Map();
 const marketSocketClients = new Set();
 const analysisCache = new Map();
+let historyQueue = Promise.resolve();
+let lastHistoryRequestAt = 0;
+const scanner = createMarketScanner({ analyze: async (key, interval) => (await loadAnalysis(key, interval)).indicators });
+const researchService = createResearchService();
 let userSummary = null;
 
 app.disable("x-powered-by");
@@ -87,14 +96,17 @@ function clientError(res, error) {
 }
 
 function stopTicker() {
-  if (ticker) {
+  clearTimeout(tickerReconnectTimer);
+  tickerReconnectTimer = null;
+  const previousTicker = ticker;
+  ticker = null;
+  if (previousTicker) {
     try {
-      ticker.disconnect();
+      previousTicker.disconnect();
     } catch (error) {
       console.warn("Could not close the Kite market-data connection.", error?.message || error);
     }
   }
-  ticker = null;
   connected = false;
 }
 
@@ -105,7 +117,7 @@ function broadcast(payload) {
   }
 }
 
-function startTicker() {
+function startTicker(accessToken) {
   stopTicker();
   const tokens = [...subscribedKeys].map(key => instrumentsByKey.get(key)?.instrument_token).filter(Boolean);
   if (!tokens.length) {
@@ -114,14 +126,23 @@ function startTicker() {
   }
 
   tickerError = null;
-  ticker = new KiteTicker({ api_key: apiKey, access_token: kite.getAccessToken() });
-  ticker.on("connect", () => {
+  let reconnectAttempts = 0;
+  let lastStreamError = "";
+  let permissionRejected = false;
+  const activeTicker = new KiteTicker({ api_key: apiKey, access_token: accessToken, reconnect: false });
+  ticker = activeTicker;
+  activeTicker.on("connect", () => {
+    if (ticker !== activeTicker) return;
     connected = true;
-    ticker.subscribe(tokens);
-    ticker.setMode(ticker.modeQuote, tokens);
+    reconnectAttempts = 0;
+    lastStreamError = "";
+    tickerError = null;
+    activeTicker.subscribe(tokens);
+    activeTicker.setMode(activeTicker.modeQuote, tokens);
     broadcast({ type: "status", connected: true });
   });
-  ticker.on("ticks", ticks => {
+  activeTicker.on("ticks", ticks => {
+    if (ticker !== activeTicker) return;
     broadcast({
       type: "ticks",
       data: ticks.map(tick => ({
@@ -133,18 +154,44 @@ function startTicker() {
       }))
     });
   });
-  ticker.on("disconnect", error => {
+  activeTicker.on("disconnect", error => {
+    if (ticker !== activeTicker) return;
     connected = false;
-    tickerError = error?.message || "Market-data connection disconnected.";
+    tickerError = lastStreamError || error?.message || "Market-data connection disconnected.";
+    if (!permissionRejected && reconnectAttempts < 5) {
+      const delay = 1000 * 2 ** reconnectAttempts;
+      reconnectAttempts += 1;
+      tickerReconnectTimer = setTimeout(() => {
+        tickerReconnectTimer = null;
+        if (ticker === activeTicker) {
+          lastStreamError = "";
+          try {
+            activeTicker.connect();
+          } catch (error) {
+            tickerError = `Market-data reconnect failed: ${error?.message || "Unknown error"}. Reconnect Zerodha to retry.`;
+            console.error(tickerError);
+            broadcast({ type: "status", connected: false, error: tickerError });
+          }
+        }
+      }, delay);
+    } else if (!permissionRejected) {
+      tickerError += " Automatic retries exhausted; reconnect Zerodha to retry.";
+    }
     broadcast({ type: "status", connected: false, error: tickerError });
   });
-  ticker.on("error", error => {
+  activeTicker.on("error", error => {
+    if (ticker !== activeTicker) return;
     connected = false;
-    tickerError = error?.message || "Market-data connection error.";
+    const message = error?.message || "Market-data connection error.";
+    permissionRejected = /unexpected server response:\s*403\b/i.test(message);
+    lastStreamError = permissionRejected
+      ? "Zerodha rejected market data (403). Check your Kite Connect plan, permissions and session, then reconnect."
+      : message;
+    tickerError = lastStreamError;
     broadcast({ type: "status", connected: false, error: tickerError });
     console.error("Kite market-data stream error:", tickerError);
   });
-  ticker.connect();
+  activeTicker.connect();
 }
 
 function closeWebSocket(client) {
@@ -153,6 +200,7 @@ function closeWebSocket(client) {
 }
 
 app.get("/api/status", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   res.json({
     configured: configured(),
     authenticated: Boolean(kite),
@@ -163,6 +211,42 @@ app.get("/api/status", (_req, res) => {
     liveOrdersEnabled: Boolean(kite),
     redirectUrl
   });
+});
+
+app.post("/api/research", requireSameOrigin, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const { symbol, generate } = req.body || {};
+  if (!["NSE:JPL", "NSE:JIOFIN"].includes(symbol) || typeof generate !== "boolean") {
+    return res.status(400).json({ error: "Select a supported Jio stock and research action." });
+  }
+  try {
+    res.json(await researchService.research(symbol, generate));
+  } catch (error) {
+    console.error("Filing research failed:", error.message);
+    res.status(502).json({ error: error.message || "Filing research failed." });
+  }
+});
+
+app.post("/api/setup", requireSameOrigin, (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  if (kite || loginInProgress) {
+    return res.status(409).json({ error: "Disconnect or wait for the current Zerodha login to finish before changing API setup." });
+  }
+  if (redirectUrl !== expectedRedirectUrl) {
+    return res.status(409).json({ error: `KITE_REDIRECT_URL must be ${expectedRedirectUrl}. Correct the local configuration and restart MarketLens.` });
+  }
+  const key = req.body?.apiKey;
+  const secret = req.body?.apiSecret;
+  const validCredential = value => typeof value === "string" && value.length > 0 &&
+    value.length <= 256 && /^[\x21-\x7e]+$/.test(value);
+  if (!validCredential(key) || !validCredential(secret)) {
+    return res.status(400).json({ error: "Enter the Kite Connect API key and API secret without spaces; each must be at most 256 characters." });
+  }
+  apiKey = key;
+  apiSecret = secret;
+  loginState = null;
+  loginStateExpires = 0;
+  res.json({ configured: true });
 });
 
 app.get("/api/login", (_req, res) => {
@@ -190,10 +274,16 @@ app.get("/auth/kite/callback", async (req, res) => {
     return res.status(400).send("Kite login was not completed. Return to MarketLens and try again.");
   }
 
+  loginInProgress = true;
   try {
+    scanner.stop();
+    analysisCache.clear();
     stopTicker();
     const newKite = new KiteConnect({ api_key: apiKey });
     const session = await newKite.generateSession(req.query.request_token, apiSecret);
+    if (typeof session?.access_token !== "string" || !session.access_token) {
+      throw new Error("Zerodha did not return an access token. Please sign in again.");
+    }
     newKite.setAccessToken(session.access_token);
     kite = newKite;
     userSummary = { name: session.user_name, id: session.user_id, broker: session.broker };
@@ -214,16 +304,28 @@ app.get("/auth/kite/callback", async (req, res) => {
         isEquity: item.instrument_type === "EQ" && item.segment === item.exchange
       }));
     instrumentsByKey = new Map(instruments.map(item => [`${item.exchange}:${item.tradingsymbol}`, item]));
+    const nseKeys = instruments.filter(item => item.isEquity && item.exchange === "NSE").map(item => `NSE:${item.tradingsymbol}`);
+    const bseKeys = instruments.filter(item => item.isEquity && item.exchange === "BSE").map(item => `BSE:${item.tradingsymbol}`);
+    const scanKeys = [];
+    for (let i = 0; i < Math.max(nseKeys.length, bseKeys.length); i += 1) {
+      if (nseKeys[i]) scanKeys.push(nseKeys[i]);
+      if (bseKeys[i]) scanKeys.push(bseKeys[i]);
+    }
+    scanner.reset(scanKeys);
+    scanner.start();
     subscribedKeys = new Set([...subscribedKeys].filter(key => instrumentsByKey.has(key)));
-    startTicker();
+    startTicker(session.access_token);
     res.redirect("/");
   } catch (error) {
+    scanner.reset([]);
     kite = null;
     stopTicker();
     userSummary = null;
     instruments = [];
     instrumentsByKey.clear();
     clientError(res, error);
+  } finally {
+    loginInProgress = false;
   }
 });
 
@@ -280,56 +382,62 @@ app.get("/api/quotes", requireSession, async (req, res) => {
   }
 });
 
+async function loadAnalysis(key, interval) {
+  const client = kite;
+  const instrument = instrumentsByKey.get(key);
+  if (!client || !instrument?.isEquity) throw new Error("The Zerodha session or equity is unavailable.");
+  const cacheKey = `${key}|${interval}`;
+  const cached = analysisCache.get(cacheKey);
+  if (cached && Date.now() - cached.createdAt < (interval === "day" ? 15 * 60000 : 60000)) return cached.data;
+  const queued = historyQueue.then(async () => {
+    const wait = Math.max(0, 400 - (Date.now() - lastHistoryRequestAt));
+    if (wait) await new Promise(resolve => setTimeout(resolve, wait));
+    if (kite !== client) throw new Error("The Zerodha session changed during analysis.");
+    lastHistoryRequestAt = Date.now();
+    const { from, to } = historicalRange(interval);
+    const history = await client.getHistoricalData(instrument.instrument_token, interval, from, to);
+    if (kite !== client) throw new Error("The Zerodha session changed during analysis.");
+    const candles = normalizeCandles(history, interval);
+    const indicators = calculateIndicators(candles);
+    const data = { symbol: key, indicators, candles };
+    if (!indicators.error) {
+      analysisCache.delete(cacheKey);
+      analysisCache.set(cacheKey, { createdAt: Date.now(), data });
+      while (analysisCache.size > 100) analysisCache.delete(analysisCache.keys().next().value);
+    }
+    return data;
+  });
+  historyQueue = queued.then(() => undefined, () => undefined);
+  return queued;
+}
+
 app.get("/api/analysis", requireSession, async (req, res) => {
   const key = String(req.query.symbol || "").toUpperCase();
   const startingCapital = Number(req.query.capital || 100000);
   if (!Number.isFinite(startingCapital) || startingCapital < 1000 || startingCapital > 100000000) {
     return res.status(400).json({ error: "Simulation capital must be between ₹1,000 and ₹10 crore." });
   }
-  const instrument = instrumentsByKey.get(key);
-  if (!instrument?.isEquity) return res.status(400).json({ error: "Select a valid NSE or BSE equity." });
-
-  const cached = analysisCache.get(key);
-  if (cached && Date.now() - cached.createdAt < 15 * 60 * 1000) {
-    return res.json({
-      ...cached.data,
-      backtest: backtestTrendStrategy(cached.data.candles, startingCapital)
-    });
-  }
-
+  if (!instrumentsByKey.get(key)?.isEquity) return res.status(400).json({ error: "Select a valid NSE or BSE equity." });
   try {
-    const todayIST = new Date(Date.now() + 330 * 60 * 1000).toISOString().slice(0, 10);
-    const yesterday = new Date(`${todayIST}T00:00:00Z`);
-    yesterday.setUTCDate(yesterday.getUTCDate() - 1);
-    const endDate = `${yesterday.toISOString().slice(0, 10)} 23:59:59`;
-    const startDateObject = new Date(yesterday);
-    startDateObject.setUTCDate(startDateObject.getUTCDate() - 180);
-    const startDate = `${startDateObject.toISOString().slice(0, 10)} 00:00:00`;
-    const history = await kite.getHistoricalData(instrument.instrument_token, "day", startDate, endDate);
-    const candles = history.map(candle => ({
-      date: candle.date instanceof Date ? candle.date.toISOString().slice(0, 10) : String(candle.date).slice(0, 10),
-      open: Number(candle.open),
-      high: Number(candle.high),
-      low: Number(candle.low),
-      close: Number(candle.close),
-      volume: Number(candle.volume || 0)
-    })).filter(candle =>
-      Number.isFinite(candle.open) && Number.isFinite(candle.high) &&
-      Number.isFinite(candle.low) && Number.isFinite(candle.close)
-    );
-    const indicators = calculateIndicators(candles);
-    if (indicators.error) return res.status(422).json({ error: indicators.error });
-
-    const data = {
-      symbol: key,
-      indicators,
-      candles
-    };
-    analysisCache.set(key, { createdAt: Date.now(), data });
-    res.json({ ...data, backtest: backtestTrendStrategy(candles, startingCapital) });
+    const data = await loadAnalysis(key, "day");
+    if (data.indicators.error) return res.status(422).json({ error: data.indicators.error });
+    res.json({ ...data, backtest: backtestTrendStrategy(data.candles, startingCapital) });
   } catch (error) {
     clientError(res, error);
   }
+});
+
+app.get("/api/market-scan", requireSession, (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json(scanner.snapshot());
+});
+
+app.post("/api/market-scan", requireSameOrigin, requireSession, (req, res) => {
+  if (!["start", "pause"].includes(req.body?.action)) return res.status(400).json({ error: "Select start or pause." });
+  if (req.body.action === "start") scanner.start();
+  else scanner.stop();
+  res.setHeader("Cache-Control", "no-store");
+  res.json(scanner.snapshot());
 });
 
 app.get("/api/account", requireSession, async (_req, res) => {
@@ -501,6 +609,7 @@ app.post("/api/orders/confirm", requireSameOrigin, requireSession, async (req, r
 });
 
 app.post("/api/logout", requireSameOrigin, requireSession, (_req, res) => {
+  scanner.reset([]);
   stopTicker();
   kite = null;
   userSummary = null;
@@ -524,6 +633,8 @@ app.get("/", (_req, res) => {
 app.get("/app.js", (_req, res) => res.sendFile(path.join(__dirname, "app.js")));
 app.get("/styles.css", (_req, res) => res.sendFile(path.join(__dirname, "styles.css")));
 app.get("/lib/paper-simulation.js", (_req, res) => res.sendFile(path.join(__dirname, "lib", "paper-simulation.js")));
+app.get("/lib/trade-ideas.js", (_req, res) => res.sendFile(path.join(__dirname, "lib", "trade-ideas.js")));
+app.get("/lib/price-chart.js", (_req, res) => res.sendFile(path.join(__dirname, "lib", "price-chart.js")));
 
 httpServer.on("upgrade", (request, socket, head) => {
   if (request.url !== "/ws" || request.headers.origin !== origin || !kite) {
