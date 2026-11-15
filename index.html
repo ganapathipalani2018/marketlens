@@ -97,7 +97,7 @@
                 <div class="panel-heading compact-heading"><div><p class="eyebrow">ROTATING NSE / BSE SCAN</p><h2>Market candidates</h2></div><button class="text-link" id="scan-toggle" disabled>Pause</button></div>
                 <p class="panel-description">Daily and 5-minute matches: close above SMA 20 above SMA 50, with RSI 45–70. A rotating scan across available equity instruments is not a real-time or complete market view.</p>
                 <div id="scan-status" class="account-updated" role="status">Connect Zerodha to start the scan.</div>
-                <div id="scan-content" aria-live="polite"></div>
+                <div id="scan-content" role="region" aria-label="Market candidate results" aria-live="polite" tabindex="0"></div>
                 <p class="fine-print">Example entry = completed candle close; sell target = close + 3 ATR; stop = close − 1.5 ATR. Prices are not live order recommendations and may be stale. Targets may never be reached; gaps, liquidity, fees and taxes can cause losses. Verify the instrument and current price before any order. The scan continues on the server while connected; use Pause to stop it.</p>
               </section>
               <section class="panel" id="jio-review">
@@ -168,6 +168,7 @@
                 <p class="panel-description">Real CNC delivery orders. Review every detail and confirm explicitly before sending to Zerodha.</p>
                 <form id="order-form" class="order-form">
                   <label>Equity (exchange:symbol) <input id="order-symbol" list="instrument-options" placeholder="NSE:RELIANCE" required disabled></label>
+                  <p class="fine-print">Type a symbol or company name for up to 50 matching suggestions.</p>
                   <label>Action <select id="order-side"><option value="BUY">Buy</option><option value="SELL">Sell</option></select></label>
                   <label>Quantity (shares) <input id="order-quantity" type="number" min="1" max="10000" step="1" value="1" required disabled></label>
                   <label>Limit price <span class="input-with-prefix"><span>₹</span><input id="order-price" type="number" min="0.01" step="0.05" placeholder="Enter limit price" required disabled></span></label>
@@ -264,6 +265,7 @@
         <form id="alert-form">
           <label for="alert-symbol">Stock</label>
           <input id="alert-symbol" list="instrument-options" placeholder="NSE:RELIANCE" required>
+          <p class="fine-print">Type a symbol or company name for up to 50 matching suggestions.</p>
           <label for="alert-condition">Notify me when price goes</label>
           <select id="alert-condition"><option value="above">Above</option><option value="below">Below</option></select>
           <label for="alert-price">Target price</label>

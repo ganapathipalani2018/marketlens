@@ -147,10 +147,18 @@ function renderStocks() {
   const body = document.getElementById("stock-rows");
   const query = document.getElementById("stock-search").value.trim().toLowerCase();
   const exchangeFilter = document.getElementById("signal-filter").value;
-  const equities = instruments.filter(item => item.isEquity);
-  const visible = query
-    ? equities.filter(item => `${item.symbol} ${item.name} ${item.exchange}`.toLowerCase().includes(query)).slice(0, 100)
-    : featuredKeys.map(key => instrumentsByKey.get(key)).filter(Boolean);
+  let visible;
+  if (query) {
+    visible = [];
+    for (const item of instruments) {
+      if (item.isEquity && `${item.symbol} ${item.name} ${item.exchange}`.toLowerCase().includes(query)) {
+        visible.push(item);
+        if (visible.length === 100) break;
+      }
+    }
+  } else {
+    visible = featuredKeys.map(key => instrumentsByKey.get(key)).filter(Boolean);
+  }
 
   const sortBy = document.getElementById("stock-sort")?.value || "featured";
   let results = visible.filter(item => exchangeFilter === "all" || item.exchange === exchangeFilter);
@@ -299,12 +307,25 @@ function renderMarketScan() {
       return `<div class="scan-candidate${stale ? " stale" : ""}"><strong>${escapeHtml(item.symbol)}</strong> · ${stale ? "Old candle; verify current data" : "Rule matched"}
         <div>Example entry ${money(item.close)} · example sell target ${money(item.targetPrice)} · stop ${money(item.stopPrice)}</div>
         <div>Candle: ${escapeHtml(candleLabel)} · scanned ${escapeHtml(scanTime)} IST</div>
-        <button class="text-link" data-scan-order="${escapeHtml(item.symbol)}">Review buy order</button></div>`;
+        <button class="text-link" data-scan-order="${escapeHtml(item.symbol)}" data-scan-interval="${interval}">Review buy order</button></div>`;
     }).join("");
     return `<h3 class="ideas-section-title">${title}</h3>${cards || '<p class="account-empty">No matches found in the scanned instruments yet.</p>'}`;
   };
-  content.innerHTML = section("Daily · latest matches", marketScan.candidates.day, "day") +
+  const markup = section("Daily · latest matches", marketScan.candidates.day, "day") +
     section("5-minute · latest matches", marketScan.candidates["5minute"], "5minute");
+  if (content.innerHTML !== markup) {
+    const scrollTop = content.scrollTop;
+    const focusedButton = content.contains(document.activeElement) ? document.activeElement : null;
+    const focusedSymbol = focusedButton?.dataset.scanOrder;
+    const focusedInterval = focusedButton?.dataset.scanInterval;
+    content.innerHTML = markup;
+    content.scrollTop = scrollTop;
+    if (focusedSymbol) {
+      const button = [...content.querySelectorAll("[data-scan-order]")]
+        .find(item => item.dataset.scanOrder === focusedSymbol && item.dataset.scanInterval === focusedInterval);
+      (button || content).focus({ preventScroll: true });
+    }
+  }
 }
 
 async function refreshMarketScan() {
@@ -865,9 +886,24 @@ function updateOrderControls() {
   }
 }
 
-function populateInstrumentOptions() {
-  const equities = instruments.filter(item => item.isEquity);
-  document.getElementById("instrument-options").innerHTML = equities.map(item =>
+function populateInstrumentOptions(query = "") {
+  const search = query.trim().toLowerCase();
+  const matches = [];
+  if (search) {
+    for (const item of instruments) {
+      if (item.isEquity && `${keyFor(item)} ${item.name}`.toLowerCase().includes(search)) {
+        matches.push(item);
+        if (matches.length === 50) break;
+      }
+    }
+  } else {
+    for (const key of new Set([...watchlist, ...featuredKeys])) {
+      const item = instrumentsByKey.get(key);
+      if (item?.isEquity) matches.push(item);
+      if (matches.length === 50) break;
+    }
+  }
+  document.getElementById("instrument-options").innerHTML = matches.map(item =>
     `<option value="${escapeHtml(keyFor(item))}">${escapeHtml(item.name)}</option>`
   ).join("");
 }
@@ -1013,6 +1049,7 @@ async function refreshStatus() {
       instruments = [];
       instrumentsByKey.clear();
       instrumentsByToken.clear();
+      populateInstrumentOptions();
       quotes.clear();
       analysisBySymbol.clear();
       analysisRequests.clear();
@@ -1223,6 +1260,11 @@ document.getElementById("logout-button").addEventListener("click", async () => {
   }
 });
 document.getElementById("stock-search").addEventListener("input", renderStocks);
+for (const id of ["order-symbol", "alert-symbol"]) {
+  const input = document.getElementById(id);
+  input.addEventListener("focus", () => populateInstrumentOptions(input.value));
+  input.addEventListener("input", () => populateInstrumentOptions(input.value));
+}
 document.getElementById("signal-filter").addEventListener("change", renderStocks);
 document.getElementById("stock-sort").addEventListener("change", renderStocks);
 document.getElementById("refresh-jio").addEventListener("click", () => void refreshJio());
