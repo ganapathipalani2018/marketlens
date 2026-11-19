@@ -1,6 +1,12 @@
 import { calculatePaperOrder, paperDrawdownReached, paperExitReason } from "./lib/paper-simulation.js";
 import { tradeIdea } from "./lib/trade-ideas.js";
 import { buildPriceChart } from "./lib/price-chart.js";
+let intradayModule;
+try {
+  intradayModule = await import("./lib/intraday-strategy.js");
+} catch (error) {
+  console.error("Could not load the intraday strategy module.", error);
+}
 
 const featuredKeys = [
   "NSE:RELIANCE", "NSE:TCS", "NSE:INFY", "NSE:HDFCBANK", "NSE:ICICIBANK",
@@ -70,7 +76,20 @@ let toastTimer;
 let accountSnapshot = null;
 let activeAccountTab = "funds";
 let currentAnalysisKey = "";
+let currentAnalysisData = null;
+let currentChartRange = 90;
+let intradayGeneration = 0;
+let intraday = null;
+let orderQuoteGeneration = 0;
 let marketSessionGeneration = 0;
+let searchGeneration = 0;
+let searchTimer;
+let searchKeys = [];
+let searchQuoteStatus = new Map();
+let searchAnalysisStatus = new Map();
+let searchAnalysisErrors = new Map();
+let searchStreamError = "";
+let searchQuoteError = "";
 let ideasGeneration = 0;
 let ideaResults = new Map();
 let ideaErrors = new Map();
@@ -143,25 +162,29 @@ function setConnectionStatus(status, error = "") {
   if (error) document.getElementById("quote-foot").textContent = error;
 }
 
+function visibleStocks() {
+  const query = document.getElementById("stock-search").value.trim().toLowerCase();
+  const exchangeFilter = document.getElementById("signal-filter").value;
+  if (query) {
+    const visible = [];
+    for (const item of instruments) {
+      if (item.isEquity && (exchangeFilter === "all" || item.exchange === exchangeFilter) &&
+          `${item.symbol} ${item.name} ${item.exchange}`.toLowerCase().includes(query)) {
+        visible.push(item);
+        if (visible.length === 10) break;
+      }
+    }
+    return visible;
+  }
+  return featuredKeys.map(key => instrumentsByKey.get(key))
+    .filter(item => item && (exchangeFilter === "all" || item.exchange === exchangeFilter));
+}
+
 function renderStocks() {
   const body = document.getElementById("stock-rows");
   const query = document.getElementById("stock-search").value.trim().toLowerCase();
-  const exchangeFilter = document.getElementById("signal-filter").value;
-  let visible;
-  if (query) {
-    visible = [];
-    for (const item of instruments) {
-      if (item.isEquity && `${item.symbol} ${item.name} ${item.exchange}`.toLowerCase().includes(query)) {
-        visible.push(item);
-        if (visible.length === 100) break;
-      }
-    }
-  } else {
-    visible = featuredKeys.map(key => instrumentsByKey.get(key)).filter(Boolean);
-  }
-
   const sortBy = document.getElementById("stock-sort")?.value || "featured";
-  let results = visible.filter(item => exchangeFilter === "all" || item.exchange === exchangeFilter);
+  let results = visibleStocks();
   if (sortBy === "score") results = results.sort((left, right) =>
     (analysisBySymbol.get(keyFor(right))?.indicators.score ?? -1) -
     (analysisBySymbol.get(keyFor(left))?.indicators.score ?? -1));
@@ -170,22 +193,23 @@ function renderStocks() {
   if (sortBy === "name") results = results.sort((left, right) => left.name.localeCompare(right.name));
   body.innerHTML = results.map(item => {
     const key = keyFor(item);
-    const quote = quotes.get(key);
-    const price = quote ? money(quote.price) : "—";
+    const quote = searchQuoteStatus.get(key) ? null : quotes.get(key);
+    const price = quote ? money(quote.price) : (searchQuoteStatus.get(key) || "—");
     const change = Number.isFinite(quote?.change)
       ? `<span class="${quote.change >= 0 ? "positive" : "negative"}">${quote.change >= 0 ? "+" : ""}${quote.change.toFixed(2)}%</span>`
       : "—";
     const ticker = item.symbol.slice(0, 2).toUpperCase();
     const analysis = analysisBySymbol.get(key);
-    const indicators = analysis?.indicators;
-    const score = indicators ? `<span class="score-pill score-${indicators.score >= 75 ? "high" : indicators.score >= 50 ? "mid" : "low"}" title="Indicator agreement, not a probability or recommendation">${indicators.score}/100</span>` : '<span class="score-pending">Not analyzed</span>';
+    const indicators = searchAnalysisStatus.has(key) ? null : analysis?.indicators;
+    const analysisStatus = searchAnalysisStatus.get(key) || "Not analyzed";
+    const score = indicators ? `<span class="score-pill score-${indicators.score >= 75 ? "high" : indicators.score >= 50 ? "mid" : "low"}" title="Indicator agreement, not a probability or recommendation">${indicators.score}/100</span>` : `<span class="score-pending" title="${escapeHtml(searchAnalysisErrors.get(key) || "")}">${escapeHtml(analysisStatus)}</span>`;
     return `<tr>
       <td><div class="company-cell"><span class="stock-avatar">${escapeHtml(ticker)}</span><span><span class="company-name">${escapeHtml(item.name)}</span><span class="company-ticker">${escapeHtml(item.symbol)}</span></span></div></td>
       <td class="table-price">${price}</td>
       <td>${change}</td>
-      <td><span class="signal-pill ${indicators?.trend === "Uptrend" ? "signal-positive" : indicators?.trend === "Downtrend" ? "signal-negative" : "signal-watch"}">${indicators?.trend || item.exchange}</span></td>
+      <td><span class="signal-pill ${indicators?.trend === "Uptrend" ? "signal-positive" : indicators?.trend === "Downtrend" ? "signal-negative" : "signal-watch"}">${escapeHtml(indicators?.trend || (query ? analysisStatus : item.exchange))}</span></td>
       <td>${score}</td>
-      <td><div class="row-actions"><button class="star-button ${watchlist.includes(key) ? "saved" : ""}" data-watch="${escapeHtml(key)}" aria-label="${watchlist.includes(key) ? "Remove" : "Add"} ${escapeHtml(key)} ${watchlist.includes(key) ? "from" : "to"} watchlist">${watchlist.includes(key) ? "★" : "☆"}</button><button class="more-button" data-analysis="${escapeHtml(key)}" aria-label="View ${escapeHtml(key)} analysis">···</button></div></td>
+      <td><div class="row-actions"><button class="star-button ${watchlist.includes(key) ? "saved" : ""}" data-watch="${escapeHtml(key)}" aria-label="${watchlist.includes(key) ? "Remove" : "Add"} ${escapeHtml(key)} ${watchlist.includes(key) ? "from" : "to"} watchlist">${watchlist.includes(key) ? "★" : "☆"}</button><button class="more-button" data-analysis="${escapeHtml(key)}" aria-label="View ${escapeHtml(key)} analysis">Chart</button></div></td>
     </tr>`;
   }).join("");
 
@@ -194,6 +218,14 @@ function renderStocks() {
   empty.textContent = appStatus.authenticated
     ? (query ? "No equities match your search." : "No instrument list is available.")
     : "Connect Zerodha to load live NSE/BSE quotes.";
+  const searchNote = document.getElementById("search-status");
+  searchNote.classList.toggle("hidden", !query);
+  const streamStatus = searchStreamError || (appStatus.authenticated && !appStatus.connected ? "Live stream unavailable; displayed quotes are snapshots and may be stale." : "");
+  const analysisError = searchAnalysisErrors.size
+    ? `Some analyses are unavailable: ${searchAnalysisErrors.values().next().value}. Open Chart to retry.`
+    : "";
+  const note = ["Showing up to 10 matches. Narrow your search for others. Quotes can be delayed; trend and score use completed daily candles.", streamStatus, searchQuoteError, analysisError].filter(Boolean).join(" ");
+  if (searchNote.textContent !== note) searchNote.textContent = note;
 }
 
 function renderWatchlist() {
@@ -304,9 +336,14 @@ function renderMarketScan() {
       const candleLabel = interval === "day" ? item.date :
         new Date(candleTime).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) + " IST";
       const scanTime = new Date(item.scannedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
-      return `<div class="scan-candidate${stale ? " stale" : ""}"><strong>${escapeHtml(item.symbol)}</strong> · ${stale ? "Old candle; verify current data" : "Rule matched"}
-        <div>Example entry ${money(item.close)} · example sell target ${money(item.targetPrice)} · stop ${money(item.stopPrice)}</div>
-        <div>Candle: ${escapeHtml(candleLabel)} · scanned ${escapeHtml(scanTime)} IST</div>
+      return `<div class="scan-candidate${stale ? " stale" : ""}">
+        <div class="scan-candidate-heading"><strong>${escapeHtml(item.symbol)}</strong><span>${stale ? "Old candle — verify current data" : "Rule matched"}</span></div>
+        <div class="scan-prices" aria-label="Illustrative prices">
+          <div><span>Example entry</span><strong>${money(item.close)}</strong></div>
+          <div><span>Example target</span><strong>${money(item.targetPrice)}</strong></div>
+          <div><span>Example stop</span><strong>${money(item.stopPrice)}</strong></div>
+        </div>
+        <p class="scan-timestamps">Candle: ${escapeHtml(candleLabel)}<br>Scanned: ${escapeHtml(scanTime)} IST</p>
         <button class="text-link" data-scan-order="${escapeHtml(item.symbol)}" data-scan-interval="${interval}">Review buy order</button></div>`;
     }).join("");
     return `<h3 class="ideas-section-title">${title}</h3>${cards || '<p class="account-empty">No matches found in the scanned instruments yet.</p>'}`;
@@ -884,6 +921,67 @@ function updateOrderControls() {
   if (available && !document.getElementById("order-symbol").value) {
     document.getElementById("order-symbol").value = "NSE:RELIANCE";
   }
+  renderOrderQuote();
+}
+
+function selectedOrderKey() {
+  return document.getElementById("order-symbol").value.trim().toUpperCase();
+}
+
+function hasOrderQuote(key) {
+  const price = quotes.get(key)?.price;
+  return Number.isFinite(price) && price > 0;
+}
+
+function renderOrderQuote() {
+  const reference = document.getElementById("order-quote-reference");
+  const currentPrice = document.getElementById("order-current-price");
+  currentPrice.value = "";
+  const key = selectedOrderKey();
+  if (!appStatus.authenticated) {
+    reference.textContent = "Connect Zerodha to see a price reference for the selected stock.";
+    return;
+  }
+  if (!instrumentsByKey.get(key)?.isEquity) {
+    reference.textContent = "Select an available equity to see its last traded price.";
+    return;
+  }
+  const quote = quotes.get(key);
+  if (!hasOrderQuote(key)) {
+    reference.textContent = `Last traded price for ${key} is unavailable. Check the current quote in Zerodha.`;
+    return;
+  }
+  currentPrice.value = money(quote.price);
+  const time = quote.timestamp ? new Date(quote.timestamp) : null;
+  const timestamp = time && Number.isFinite(time.getTime())
+    ? `Quote time: ${time.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} IST.`
+    : "Quote time unavailable.";
+  reference.textContent = `${key} last traded price: ${money(quote.price)}. ${timestamp} This reference may be delayed and is not a guaranteed execution price. Choose and enter your own limit price.`;
+}
+
+async function loadOrderQuote() {
+  const key = selectedOrderKey();
+  const generation = ++orderQuoteGeneration;
+  const session = marketSessionGeneration;
+  renderOrderQuote();
+  if (!appStatus.authenticated || !instrumentsByKey.get(key)?.isEquity || hasOrderQuote(key)) return;
+  const reference = document.getElementById("order-quote-reference");
+  reference.textContent = `Loading last traded price for ${key}…`;
+  try {
+    const snapshot = await requestJson(`/api/quotes?symbols=${encodeURIComponent(key)}`);
+    if (generation !== orderQuoteGeneration || session !== marketSessionGeneration || selectedOrderKey() !== key || !appStatus.authenticated) return;
+    if (hasOrderQuote(key)) {
+      renderOrderQuote();
+      return;
+    }
+    const quote = Array.isArray(snapshot) ? snapshot.find(item => item.key === key && Number.isFinite(item.price) && item.price > 0) : null;
+    if (!quote) throw new Error("No valid quote was returned.");
+    recordQuote(key, quote);
+  } catch (error) {
+    if (generation !== orderQuoteGeneration || session !== marketSessionGeneration || selectedOrderKey() !== key || !appStatus.authenticated) return;
+    if (hasOrderQuote(key)) renderOrderQuote();
+    else reference.textContent = `Could not load the last traded price for ${key}: ${error.message} Check the current quote in Zerodha.`;
+  }
 }
 
 function populateInstrumentOptions(query = "") {
@@ -909,21 +1007,90 @@ function populateInstrumentOptions(query = "") {
 }
 
 function recordQuote(key, quote) {
-  if (!key || !Number.isFinite(Number(quote.price))) return;
+  if (!key || quote.price == null || !Number.isFinite(Number(quote.price))) return;
   const normalized = {
     price: Number(quote.price),
-    change: Number.isFinite(Number(quote.change)) ? Number(quote.change) : null,
+    change: quote.change != null && Number.isFinite(Number(quote.change)) ? Number(quote.change) : null,
     ohlc: quote.ohlc || null,
     volume: quote.volume || null,
     timestamp: quote.timestamp || null
   };
   quotes.set(key, normalized);
   processPaperQuote(key, normalized.price);
-  const instrument = instrumentsByKey.get(key);
-  if (instrument && normalized.price > 0) {
-    document.getElementById("order-price").placeholder = `e.g. ${normalized.price.toFixed(2)}`;
-  }
+  if (key === selectedOrderKey()) renderOrderQuote();
   checkAlerts(key, normalized.price);
+}
+
+function sendSearchSubscription() {
+  if (marketSocket?.readyState === WebSocket.OPEN) {
+    marketSocket.send(JSON.stringify({ type: "search-subscription", symbols: searchKeys, requestId: searchGeneration }));
+  }
+}
+
+function updateStockSearch() {
+  const generation = ++searchGeneration;
+  window.clearTimeout(searchTimer);
+  searchKeys = [];
+  searchQuoteStatus = new Map();
+  searchAnalysisStatus = new Map();
+  searchAnalysisErrors = new Map();
+  searchStreamError = "";
+  searchQuoteError = "";
+  sendSearchSubscription();
+  const query = document.getElementById("stock-search").value.trim();
+  if (!query || !appStatus.authenticated) {
+    renderStocks();
+    return;
+  }
+  const keys = visibleStocks().map(keyFor);
+  for (const key of keys) {
+    searchQuoteStatus.set(key, "Loading...");
+    searchAnalysisStatus.set(key, "Loading...");
+  }
+  renderStocks();
+  searchTimer = window.setTimeout(() => void loadStockSearch(keys, generation), 350);
+}
+
+async function loadStockSearch(keys, generation) {
+  if (generation !== searchGeneration || !appStatus.authenticated || !keys.length) return;
+  const session = marketSessionGeneration;
+  const current = () => generation === searchGeneration && session === marketSessionGeneration && appStatus.authenticated;
+  searchKeys = keys;
+  sendSearchSubscription();
+  const previousQuotes = new Map(keys.map(key => [key, quotes.get(key)]));
+  const snapshot = requestJson(`/api/quotes?symbols=${encodeURIComponent(keys.join(","))}`)
+    .then(items => {
+      if (!current()) return;
+      const received = new Set();
+      for (const item of items) {
+        if (!previousQuotes.has(item.key) || item.price == null || !Number.isFinite(Number(item.price))) continue;
+        received.add(item.key);
+        if (quotes.get(item.key) === previousQuotes.get(item.key)) recordQuote(item.key, item);
+      }
+      for (const key of keys) searchQuoteStatus.set(key, received.has(key) || quotes.get(key) !== previousQuotes.get(key) ? "" : "Unavailable");
+      renderStocks();
+      renderWatchlist();
+    })
+    .catch(error => {
+      if (!current()) return;
+      for (const key of keys) searchQuoteStatus.set(key, quotes.get(key) !== previousQuotes.get(key) ? "" : "Unavailable");
+      searchQuoteError = `Quote snapshot unavailable: ${error.message}. Live updates depend on the stream.`;
+      renderStocks();
+    });
+  for (const key of keys) {
+    if (!current()) break;
+    try {
+      await fetchAnalysis(key);
+      if (current()) searchAnalysisStatus.delete(key);
+    } catch (error) {
+      if (!current()) break;
+      searchAnalysisStatus.set(key, "Unavailable");
+      searchAnalysisErrors.set(key, error.message);
+      console.warn(`Could not analyze ${key}:`, error);
+    }
+    if (current()) renderStocks();
+  }
+  await snapshot;
 }
 
 function checkAlerts(key, price) {
@@ -964,6 +1131,10 @@ function connectMarketSocket() {
   if (marketSocket) marketSocket.close();
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   marketSocket = new WebSocket(`${protocol}//${location.host}/ws`);
+  marketSocket.addEventListener("open", () => {
+    sendSearchSubscription();
+    sendChartSubscription();
+  });
   marketSocket.addEventListener("message", event => {
     let message;
     try {
@@ -974,14 +1145,30 @@ function connectMarketSocket() {
     }
     if (message.type === "status") {
       appStatus.connected = Boolean(message.connected);
+      if (!appStatus.connected && intraday) intraday.tick = null;
       setConnectionStatus(appStatus, message.error || "");
       renderIndexCards();
       renderPaper();
+      renderIntraday();
+    }
+    if (message.type === "search-subscription" && message.requestId === searchGeneration) {
+      searchStreamError = message.error ? `Live search quotes unavailable: ${message.error}` : "";
+      renderStocks();
+    }
+    if (message.type === "chart-subscription" && intraday && message.requestId === intraday.generation) {
+      intraday.subscribed = !message.error;
+      intraday.subscriptionError = message.error || "";
+      renderIntraday();
     }
     if (message.type === "ticks") {
       for (const tick of message.data || []) {
         const instrument = instrumentsByToken.get(Number(tick.token));
-        if (instrument) recordQuote(keyFor(instrument), tick);
+        if (instrument) {
+          const key = keyFor(instrument);
+          if (tick.price != null && Number.isFinite(Number(tick.price))) searchQuoteStatus.delete(key);
+          recordQuote(key, tick);
+          if (intraday?.key === key) recordIntradayTick(tick);
+        }
       }
       renderStocks();
       renderWatchlist();
@@ -990,9 +1177,13 @@ function connectMarketSocket() {
   });
   marketSocket.addEventListener("close", () => {
     if (appStatus.authenticated) {
+      if (searchKeys.length) searchStreamError = "Live search stream disconnected. Displayed quotes may be stale.";
       appStatus.connected = false;
       setConnectionStatus(appStatus);
       renderIndexCards();
+      renderStocks();
+      if (intraday) intraday.subscribed = false;
+      renderIntraday();
     }
   });
   marketSocket.addEventListener("error", () => {
@@ -1011,6 +1202,7 @@ async function loadAuthenticatedData() {
   renderAccount();
   updateOrderControls();
   connectMarketSocket();
+  updateStockSearch();
   void refreshMarketScan();
   void refreshJio();
   await refreshAccount();
@@ -1046,6 +1238,8 @@ async function refreshStatus() {
     if (appStatus.authenticated && (!previousAuth || !instruments.length)) {
       await loadAuthenticatedData();
     } else if (!appStatus.authenticated && previousAuth) {
+      stopIntraday();
+      updateStockSearch();
       instruments = [];
       instrumentsByKey.clear();
       instrumentsByToken.clear();
@@ -1107,50 +1301,224 @@ function openAlertDialog(key = "") {
 function openAnalysis(key) {
   const instrument = instrumentsByKey.get(key);
   if (!instrument) return;
+  stopIntraday();
   currentAnalysisKey = key;
-  document.getElementById("analysis-content").innerHTML = renderAnalysisHtml(key, null, "");
+  currentAnalysisData = null;
+  currentChartRange = 90;
+  document.getElementById("analysis-content").innerHTML = renderAnalysisHtml(key, null,
+    appStatus.authenticated ? "Loading up to 180 days of daily indicators…" : "");
   document.getElementById("analysis-dialog").showModal();
   if (!appStatus.authenticated) return;
-  document.getElementById("analysis-content").innerHTML = renderAnalysisHtml(key, null, "Loading up to 180 days of daily indicators…");
+  startIntraday(key);
+  const generation = intraday.generation;
   fetchAnalysis(key).then(data => {
-    if (document.getElementById("analysis-dialog").open && currentAnalysisKey === key) {
-      document.getElementById("analysis-content").innerHTML = renderAnalysisHtml(key, data, "");
+    if (document.getElementById("analysis-dialog").open && currentAnalysisKey === key && intraday?.generation === generation) {
+      currentAnalysisData = data;
+      document.getElementById("daily-analysis-block").innerHTML = renderDailyAnalysis(data, "");
     }
   }).catch(error => {
-    if (document.getElementById("analysis-dialog").open && currentAnalysisKey === key) {
-      document.getElementById("analysis-content").innerHTML = renderAnalysisHtml(key, null, error.message);
+    if (document.getElementById("analysis-dialog").open && currentAnalysisKey === key && intraday?.generation === generation) {
+      document.getElementById("daily-analysis-block").innerHTML = renderDailyAnalysis(null, error.message);
     }
   });
 }
 
-function renderPriceChart(data) {
-  const chart = buildPriceChart(data.candles, data.backtest);
+function sendChartSubscription() {
+  if (intraday && !intradayModule) return;
+  if (marketSocket?.readyState === WebSocket.OPEN) {
+    marketSocket.send(JSON.stringify({
+      type: "chart-subscription", symbol: intraday?.key || "", requestId: intradayGeneration
+    }));
+  }
+}
+
+function stopIntraday() {
+  intradayGeneration += 1;
+  if (intraday?.timer) window.clearInterval(intraday.timer);
+  intraday = null;
+  sendChartSubscription();
+  renderIntraday();
+}
+
+function startIntraday(key) {
+  const generation = ++intradayGeneration;
+  intraday = {
+    key, generation, candles: null, tick: null, entryPrice: "", subscribed: false,
+    subscriptionError: "", historyError: "", loading: false, lastRequest: 0,
+    bucket: Math.floor(Date.now() / 300000)
+  };
+  if (!intradayModule) {
+    intraday.historyError = "Could not load the live strategy. Restart the app and refresh the page.";
+    renderIntraday();
+    return;
+  }
+  sendChartSubscription();
+  void refreshIntradayHistory();
+  intraday.timer = window.setInterval(() => {
+    if (!intraday || intraday.generation !== generation) return;
+    const now = Date.now();
+    const bucket = Math.floor(now / 300000);
+    const changedBucket = bucket !== intraday.bucket;
+    intraday.bucket = bucket;
+    const latest = Date.parse(intraday.candles?.at(-1)?.date);
+    if (intradayModule.intradaySessionTime(now) &&
+        (changedBucket || ((!intraday.candles || latest !== bucket * 300000 - 300000) && now - intraday.lastRequest >= 20000))) {
+      void refreshIntradayHistory();
+    }
+    renderIntraday();
+  }, 1000);
+  renderIntraday();
+}
+
+async function refreshIntradayHistory() {
+  const state = intraday;
+  if (!state || state.loading) return;
+  state.loading = true;
+  state.lastRequest = Date.now();
+  try {
+    const data = await requestJson(`/api/intraday-analysis?symbol=${encodeURIComponent(state.key)}`);
+    if (intraday !== state) return;
+    state.candles = data.candles;
+    state.historyError = "";
+  } catch (error) {
+    if (intraday !== state) return;
+    state.candles = null;
+    state.historyError = error.message;
+  } finally {
+    if (intraday === state) {
+      state.loading = false;
+      renderIntraday();
+    }
+  }
+}
+
+function recordIntradayTick(quote) {
+  const price = Number(quote.price);
+  if (quote.price == null || !Number.isFinite(price) || price <= 0) return;
+  const now = Date.now();
+  const start = Math.floor(now / 300000) * 300000;
+  const previous = intraday.tick?.start === start ? intraday.tick : null;
+  intraday.tick = {
+    start, receivedAt: now, price,
+    sourceAt: quote.timestamp == null ? null : new Date(quote.timestamp).getTime(),
+    open: previous?.open ?? price,
+    high: Math.max(previous?.high ?? price, price),
+    low: Math.min(previous?.low ?? price, price)
+  };
+  renderIntraday();
+}
+
+function renderIntraday() {
+  const container = document.getElementById("intraday-visual");
+  if (!container) return;
+  if (!intraday) {
+    container.innerHTML = '<p class="chart-marker-empty">Connect Zerodha to use the intraday chart.</p>';
+    return;
+  }
+  const state = intraday;
+  if (state.subscriptionError || state.historyError) {
+    const error = state.subscriptionError ? `Live stream subscription unavailable: ${state.subscriptionError}` :
+      `Intraday history unavailable: ${state.historyError}`;
+    container.innerHTML = `<p class="analysis-error">${escapeHtml(error)}</p>`;
+    return;
+  }
+  const result = intradayModule.evaluateIntraday({
+    candles: state.candles, tick: state.tick, now: Date.now(),
+    connected: appStatus.authenticated && appStatus.connected && state.subscribed && marketSocket?.readyState === WebSocket.OPEN,
+    entryPrice: state.entryPrice
+  });
+  if (result.error) {
+    container.innerHTML = `<p class="chart-marker-empty">${escapeHtml(result.error)}</p>`;
+    return;
+  }
+  const values = result.points.map(point => point.price);
+  if (result.levels) values.push(result.levels.stopPrice, result.levels.targetPrice);
+  const low = Math.min(...values), high = Math.max(...values);
+  const padding = Math.max((high - low) * 0.1, high * 0.005);
+  const min = Math.max(0, low - padding), max = high + padding;
+  const x = index => 60 + index / (result.points.length - 1) * 400;
+  const y = price => 190 - (price - min) / (max - min) * 170;
+  const path = result.points.map((point, index) => `${x(index).toFixed(1)},${y(point.price).toFixed(1)}`).join(" ");
+  const lastY = y(result.price);
+  const marker = (side, position) => `<g><circle cx="${position}" cy="${lastY.toFixed(1)}" r="8" fill="${side === "buy" ? "#128765" : "#c34659"}" stroke="#fff" stroke-width="2"/><text class="chart-marker-letter" x="${position}" y="${(lastY + 3.2).toFixed(1)}" text-anchor="middle">${side === "buy" ? "B" : "S"}</text></g>`;
+  const targetLines = result.levels ? `
+    <line x1="60" y1="${y(result.levels.targetPrice).toFixed(1)}" x2="460" y2="${y(result.levels.targetPrice).toFixed(1)}" stroke="#128765" stroke-dasharray="4 3"/>
+    <line x1="60" y1="${y(result.levels.stopPrice).toFixed(1)}" x2="460" y2="${y(result.levels.stopPrice).toFixed(1)}" stroke="#c34659" stroke-dasharray="4 3"/>` : "";
+  const levels = result.levels
+    ? `Example target ${money(result.levels.targetPrice)} · stop ${money(result.levels.stopPrice)} (5-minute ATR ${money(result.atr)}). These levels change when ATR changes.`
+    : result.entryError || "Enter a buy price to see an example target and stop.";
+  const received = new Date(result.receivedAt).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" });
+  container.innerHTML = `
+    <svg viewBox="0 0 500 215" role="img" aria-label="Recent 5-minute closing prices and current provisional strategy conditions">
+      <line x1="60" y1="20" x2="60" y2="190" stroke="#cdd4e0"/><line x1="60" y1="190" x2="460" y2="190" stroke="#cdd4e0"/>
+      <text x="0" y="24">${escapeHtml(money(max))}</text><text x="0" y="190">${escapeHtml(money(min))}</text>
+      ${targetLines}<polyline fill="none" stroke="#4867db" stroke-width="2" points="${path}"/>
+      ${result.buy ? marker("buy", result.sell ? 450 : 460) : ""}
+      ${result.sell ? marker("sell", result.buy ? 470 : 460) : ""}
+      ${!result.buy && !result.sell ? `<circle cx="460" cy="${lastY.toFixed(1)}" r="4" fill="#4867db"/>` : ""}
+      <text x="60" y="210">Earlier 5-minute closes</text><text x="460" y="210" text-anchor="end">Current tick</text>
+    </svg>
+    <div class="intraday-signals"><p><strong>Current price:</strong> ${escapeHtml(money(result.price))} · received ${escapeHtml(received)} IST</p>
+      <p><span class="chart-marker-badge buy">B</span> ${result.buy ? "Buy rule currently met" : "Buy rule not currently met"}</p>
+      <p><span class="chart-marker-badge sell">S</span> ${result.sell ? `Sell condition currently met: ${escapeHtml(result.reasons.join("; "))}` : "Sell condition not currently met"}</p>
+      <p>${escapeHtml(levels)}</p></div>`;
+}
+
+function renderPriceChart(data, range = 90) {
+  const chart = buildPriceChart(data.candles, data.backtest, tradeIdea(data.indicators), range);
   if (chart.error) return `<p class="analysis-error">${escapeHtml(chart.error)}</p>`;
   const left = 60, right = 480, top = 20, bottom = 200;
   const x = index => left + index / (chart.points.length - 1) * (right - left);
   const y = value => bottom - (value - chart.min) / (chart.max - chart.min) * (bottom - top);
   const line = field => chart.points.map((point, index) =>
     Number.isFinite(point[field]) ? `${x(index).toFixed(1)},${y(point[field]).toFixed(1)}` : "").filter(Boolean).join(" ");
-  const marker = item => `<circle cx="${x(item.index).toFixed(1)}" cy="${y(item.price).toFixed(1)}" r="4" fill="${item.side === "buy" ? "#128765" : "#c34659"}"><title>Simulated ${item.side} ${escapeHtml(item.date)} at ${escapeHtml(money(item.price))}</title></circle>`;
+  const markerReason = item => ({
+    "Entry rule": "Entry rule met",
+    "ATR stop": "Stop reached (based on ATR)",
+    "2R target": "Target reached (twice the planned risk)",
+    "Trend exit": "Trend exit rule met"
+  }[item.reason] || item.reason);
+  const marker = item => {
+    const sharedDay = chart.markers.some(other => other !== item && other.index === item.index && other.side !== item.side);
+    const pointX = x(item.index), pointY = y(item.price);
+    const markerX = pointX + (sharedDay ? (item.side === "buy" ? -10 : 10) : 0);
+    const color = item.side === "buy" ? "#128765" : "#c34659";
+    return `<g><title>Simulated ${item.side} on ${escapeHtml(item.date)} at ${escapeHtml(money(item.price))}: ${escapeHtml(markerReason(item))}</title>
+      ${sharedDay ? `<line x1="${pointX.toFixed(1)}" y1="${pointY.toFixed(1)}" x2="${markerX.toFixed(1)}" y2="${pointY.toFixed(1)}" stroke="${color}" stroke-width="2"/>` : ""}
+      <circle cx="${markerX.toFixed(1)}" cy="${pointY.toFixed(1)}" r="8" fill="${color}" stroke="#fff" stroke-width="2"/>
+      <text class="chart-marker-letter" x="${markerX.toFixed(1)}" y="${(pointY + 3.2).toFixed(1)}" text-anchor="middle">${item.side === "buy" ? "B" : "S"}</text></g>`;
+  };
+  const condition = chart.condition;
+  const conditionLabel = condition.error ? `Unavailable: ${condition.error}` :
+    condition.buy && condition.sell ? "Buy and trend-exit conditions met" :
+    condition.buy ? "Buy condition met" : condition.sell ? "Trend-exit condition met" : "Neither condition met";
+  const highlight = !condition.error && (condition.buy || condition.sell)
+    ? `<circle cx="${x(condition.index).toFixed(1)}" cy="${y(condition.price).toFixed(1)}" r="12" fill="none" stroke="${condition.buy && condition.sell ? "#8055a8" : condition.buy ? "#128765" : "#c34659"}" stroke-width="3"><title>${escapeHtml(conditionLabel)} on ${escapeHtml(condition.date)} at ${escapeHtml(money(condition.price))}</title></circle>`
+    : "";
+  const markerList = chart.markers.length
+    ? `<ol class="chart-marker-list">${chart.markers.map(item => `<li><span class="chart-marker-badge ${item.side}">${item.side === "buy" ? "B" : "S"}</span><span><strong>Simulated ${item.side}</strong> · ${escapeHtml(item.date)} · ${escapeHtml(money(item.price))}<br><small>${escapeHtml(markerReason(item))}</small></span></li>`).join("")}</ol>`
+    : `<p class="chart-marker-empty">${data.backtest?.error ? `Simulation unavailable: ${escapeHtml(data.backtest.error)}` : data.backtest ? "No simulated buy or sell points in this range. Try a longer range." : "Simulation unavailable."}</p>`;
   return `<figure class="chart-wrap">
-    <svg viewBox="0 0 500 235" role="img" aria-label="Daily closing prices with 20 and 50 day moving averages and historical simulated trade markers">
+    <div class="chart-controls"><label for="chart-range">Daily chart history</label><select id="chart-range" data-chart-range>${[30, 60, 90].map(value => `<option value="${value}"${value === range ? " selected" : ""}>Last ${value} sessions</option>`).join("")}</select></div>
+    <div class="chart-legend" aria-label="Strategy marker legend"><span><span class="chart-marker-badge buy">B</span> Simulated buy</span><span><span class="chart-marker-badge sell">S</span> Simulated sell</span><span>Outline ring: latest rule condition</span></div>
+    <svg viewBox="0 0 500 235" role="img" aria-label="Daily closing prices with moving averages, historical simulated trades, and latest rule condition">
       <line x1="${left}" y1="${top}" x2="${left}" y2="${bottom}" stroke="#cdd4e0"/><line x1="${left}" y1="${bottom}" x2="${right}" y2="${bottom}" stroke="#cdd4e0"/>
       <text x="0" y="${top + 4}">${escapeHtml(money(chart.max))}</text><text x="0" y="${bottom}">${escapeHtml(money(chart.min))}</text>
       <polyline fill="none" stroke="#4867db" stroke-width="2" points="${line("close")}"/>
       <polyline fill="none" stroke="#dd9c28" stroke-width="1.5" points="${line("sma20")}"/>
       <polyline fill="none" stroke="#8c63c7" stroke-width="1.5" points="${line("sma50")}"/>
+      ${highlight}
       ${chart.markers.map(marker).join("")}
       <text x="${left}" y="223">${escapeHtml(chart.points[0].date)}</text><text x="${right}" y="223" text-anchor="end">${escapeHtml(chart.points.at(-1).date)}</text>
     </svg>
-    <figcaption class="chart-caption">Blue: daily close · orange: SMA 20 · purple: SMA 50. Green/red dots: historical simulated buy/sell fills, not real trades or future signals. Shows up to 90 completed daily candles. Past results do not predict returns.</figcaption>
+    <figcaption class="chart-caption"><strong>Latest completed daily candle${condition.error ? "" : ` (${escapeHtml(condition.date)}, ${escapeHtml(money(condition.price))})`}: ${escapeHtml(conditionLabel)}.</strong> The outline ring marks a met condition at that close, not a live signal. Entry rule: close above SMA 20, SMA 20 above SMA 50, and RSI 14 between 45 and 70. Trend exit for an existing position: close below SMA 20 or RSI above 75. Simulated sells may also use an ATR stop or target, so their price may differ from the daily close.<br>Blue: daily close · orange: SMA 20 · purple: SMA 50. Showing ${chart.points.length} completed daily candles. Data may be stale. Historical simulated trades are not real trades or recommendations; they cannot guarantee income and do not predict future returns.
+      <div class="chart-marker-heading">Historical simulated points <span>(${chart.markers.length})</span></div>
+      ${markerList}
+    </figcaption>
   </figure>`;
 }
 
-function renderAnalysisHtml(key, analysisData, analysisMessage) {
-  const instrument = instrumentsByKey.get(key);
-  if (!instrument) return "";
-  const quote = quotes.get(key);
-  const change = Number.isFinite(quote?.change) ? `${quote.change >= 0 ? "+" : ""}${quote.change.toFixed(2)}%` : "—";
+function renderDailyAnalysis(analysisData, analysisMessage) {
   const indicators = analysisData?.indicators;
   const signalSection = indicators ? `
     <div class="analysis-stat-grid extended-stat-grid">
@@ -1167,6 +1535,14 @@ function renderAnalysisHtml(key, analysisData, analysisMessage) {
   const statusMessage = analysisMessage
     ? `<p class="analysis-copy ${analysisMessage.startsWith("Loading") ? "" : "analysis-error"}">${escapeHtml(analysisMessage)}</p>`
     : "";
+  return `${analysisData ? renderPriceChart(analysisData, currentChartRange) : ""}${signalSection}${statusMessage}`;
+}
+
+function renderAnalysisHtml(key, analysisData, analysisMessage) {
+  const instrument = instrumentsByKey.get(key);
+  if (!instrument) return "";
+  const quote = quotes.get(key);
+  const change = Number.isFinite(quote?.change) ? `${quote.change >= 0 ? "+" : ""}${quote.change.toFixed(2)}%` : "—";
   return `
     <p class="eyebrow">LIVE KITE CONNECT QUOTE</p>
     <div class="analysis-content-head">
@@ -1179,7 +1555,16 @@ function renderAnalysisHtml(key, analysisData, analysisMessage) {
       <div class="analysis-stat"><span>Day high / low</span><strong>${quote?.ohlc ? `${money(quote.ohlc.high)} / ${money(quote.ohlc.low)}` : "—"}</strong></div>
       <div class="analysis-stat"><span>Volume</span><strong>${quote?.volume ? Number(quote.volume).toLocaleString("en-IN") : "—"}</strong></div>
     </div>
-    ${analysisData ? renderPriceChart(analysisData) : ""}${signalSection}${statusMessage}
+    <section class="intraday-panel chart-wrap" aria-label="Live intraday strategy">
+      <h3>Live intraday strategy</h3>
+      <p>Checks the existing 5-minute rule on each received price update. B and S can appear or disappear before the candle closes. These are not recommendations or guaranteed profits.</p>
+      <p>Buy rule: price above SMA 20, SMA 20 above SMA 50, and RSI 14 from 45 to 70. Trend exit: price below SMA 20 or RSI above 75. Buy and sell conditions are independent and can appear together.</p>
+      <label for="intraday-entry">Your buy price for example sell levels (optional)</label>
+      <input id="intraday-entry" type="number" min="0.01" step="any" inputmode="decimal" placeholder="Enter your buy price" ${appStatus.authenticated ? "" : "disabled"}>
+      <p>Dashed green is the example target; dashed red is the example stop. Both use the latest completed 5-minute ATR and are not broker orders. A sell condition is for an existing position. Trend exit can appear without a buy price. The current candle starts when this chart receives ticks and may be incomplete; quotes can be delayed.</p>
+      <div id="intraday-visual"><p class="chart-marker-empty">Waiting for live intraday data…</p></div>
+    </section>
+    <div id="daily-analysis-block">${renderDailyAnalysis(analysisData, analysisMessage)}</div>
     <div class="analysis-warning"><strong>Risk notice:</strong> Live market quotes are not guaranteed execution prices. Prices can move, orders can be rejected or partially filled, and you can lose money. Use the broker's order book to verify any submitted order.</div>
     <div class="analysis-actions"><button class="button button-secondary" data-modal-watch="${escapeHtml(key)}">${watchlist.includes(key) ? "★ In watchlist" : "☆ Add to watchlist"}</button><button class="button button-secondary" data-modal-alert="${escapeHtml(key)}">＋ Set price alert</button><button class="button button-secondary" data-modal-backtest="${escapeHtml(key)}">Run backtest</button><button class="button button-primary" data-modal-order="${escapeHtml(key)}">Review order</button></div>`;
 }
@@ -1217,6 +1602,13 @@ document.getElementById("connect-button").addEventListener("click", () => {
     return;
   }
   location.assign("/api/login");
+});
+document.getElementById("quick-connect").addEventListener("click", () => {
+  if (appStatus.authenticated) {
+    showToast("Zerodha is already connected. Check the status above for live quotes.");
+  } else {
+    document.getElementById("connect-button").click();
+  }
 });
 document.getElementById("change-setup-button").addEventListener("click", openSetup);
 document.getElementById("cancel-setup").addEventListener("click", () => document.getElementById("setup-dialog").close());
@@ -1259,13 +1651,19 @@ document.getElementById("logout-button").addEventListener("click", async () => {
     showToast(error.message);
   }
 });
-document.getElementById("stock-search").addEventListener("input", renderStocks);
+document.getElementById("stock-search").addEventListener("input", updateStockSearch);
 for (const id of ["order-symbol", "alert-symbol"]) {
   const input = document.getElementById(id);
   input.addEventListener("focus", () => populateInstrumentOptions(input.value));
   input.addEventListener("input", () => populateInstrumentOptions(input.value));
 }
-document.getElementById("signal-filter").addEventListener("change", renderStocks);
+document.getElementById("order-symbol").addEventListener("input", () => {
+  orderQuoteGeneration += 1;
+  document.getElementById("order-price").value = "";
+  renderOrderQuote();
+});
+document.getElementById("order-symbol").addEventListener("change", () => void loadOrderQuote());
+document.getElementById("signal-filter").addEventListener("change", updateStockSearch);
 document.getElementById("stock-sort").addEventListener("change", renderStocks);
 document.getElementById("refresh-jio").addEventListener("click", () => void refreshJio());
 let researchSelectionVersion = 0;
@@ -1334,6 +1732,7 @@ document.getElementById("scan-content").addEventListener("click", event => {
   document.getElementById("order-side").value = "BUY";
   document.getElementById("order-quantity").value = "1";
   document.getElementById("order-price").value = "";
+  void loadOrderQuote();
   document.getElementById("order-ticket").scrollIntoView({ behavior: "smooth", block: "center" });
   document.getElementById("order-price").focus();
 });
@@ -1344,6 +1743,7 @@ document.getElementById("ideas-content").addEventListener("click", event => {
   document.getElementById("order-side").value = button.dataset.ideaSide;
   document.getElementById("order-quantity").value = "1";
   document.getElementById("order-price").value = "";
+  void loadOrderQuote();
   document.getElementById("order-ticket").scrollIntoView({ behavior: "smooth", block: "center" });
   document.getElementById("order-price").focus();
 });
@@ -1504,6 +1904,24 @@ document.getElementById("alerts-content").addEventListener("click", event => {
   localStore.write("marketlens-alerts", alerts);
   renderAlerts();
 });
+document.getElementById("analysis-content").addEventListener("change", event => {
+  const select = event.target.closest("[data-chart-range]");
+  if (!select) return;
+  if (!currentAnalysisData) {
+    showToast("Chart data is unavailable. Reopen the analysis to retry.");
+    return;
+  }
+  currentChartRange = Number(select.value);
+  select.closest(".chart-wrap").outerHTML = renderPriceChart(currentAnalysisData, currentChartRange);
+  document.getElementById("chart-range")?.focus();
+});
+document.getElementById("analysis-content").addEventListener("input", event => {
+  if (event.target.id !== "intraday-entry" || !intraday) return;
+  intraday.entryPrice = event.target.value;
+  renderIntraday();
+});
+document.getElementById("analysis-dialog").addEventListener("close", stopIntraday);
+document.addEventListener("visibilitychange", renderIntraday);
 document.getElementById("analysis-content").addEventListener("click", event => {
   const watchButton = event.target.closest("[data-modal-watch]");
   const alertButton = event.target.closest("[data-modal-alert]");
@@ -1526,6 +1944,8 @@ document.getElementById("analysis-content").addEventListener("click", event => {
     const key = orderButton.dataset.modalOrder;
     document.getElementById("analysis-dialog").close();
     document.getElementById("order-symbol").value = key;
+    document.getElementById("order-price").value = "";
+    void loadOrderQuote();
     document.getElementById("order-ticket").scrollIntoView({ behavior: "smooth", block: "center" });
     document.getElementById("order-price").focus();
   } else if (backtestButton) {
@@ -1637,5 +2057,5 @@ document.getElementById("view-all").addEventListener("click", event => {
   event.preventDefault();
   document.getElementById("stock-search").value = "";
   document.getElementById("signal-filter").value = "all";
-  renderStocks();
+  updateStockSearch();
 });

@@ -18,10 +18,12 @@
         <div class="workspace-label">WORKSPACE</div>
         <nav class="navigation">
           <a class="nav-link active" href="#overview"><span aria-hidden="true">▦</span> Overview</a>
-          <a class="nav-link" href="#screener"><span aria-hidden="true">⌕</span> Stock analysis</a>
+          <a class="nav-link" href="#screener"><span aria-hidden="true">⌕</span> Find stocks</a>
           <a class="nav-link" href="#watchlist"><span aria-hidden="true">☆</span> Watchlist</a>
+          <a class="nav-link" href="#trade-ideas"><span aria-hidden="true">↕</span> Buy / sell watch</a>
           <a class="nav-link" href="#account"><span aria-hidden="true">₹</span> Account</a>
-          <a class="nav-link" href="#strategy-lab"><span aria-hidden="true">◈</span> Strategy lab</a>
+          <a class="nav-link" href="#order-ticket"><span aria-hidden="true">□</span> Review order</a>
+          <a class="nav-link" href="#strategy-lab"><span aria-hidden="true">◈</span> Practice &amp; test</a>
           <a class="nav-link" href="#alerts"><span aria-hidden="true">♧</span> Price alerts <span class="nav-count" id="alert-count">0</span></a>
           <a class="nav-link" href="#risk-planner"><span aria-hidden="true">◈</span> Risk planner</a>
         </nav>
@@ -53,7 +55,7 @@
             <div>
               <p class="eyebrow">YOUR MARKET WORKSPACE</p>
               <h1>Market overview</h1>
-              <p class="subheading">Live market context, transparent indicators, and tools to test a plan before risking capital.</p>
+              <p class="subheading">Follow stocks, check the daily rule and practice before risking real money.</p>
             </div>
             <button class="button button-primary" id="create-alert-top"><span aria-hidden="true">＋</span> Create alert</button>
           </section>
@@ -62,6 +64,12 @@
             <span class="notice-icon" aria-hidden="true">i</span>
             <p><strong>Trading involves risk:</strong> Live prices are not recommendations or a promise of profit. Orders are real, CNC delivery-only limit orders, and every order requires your explicit confirmation.</p>
             <button class="notice-dismiss" id="dismiss-notice" aria-label="Dismiss notice">×</button>
+          </section>
+
+          <section class="getting-started" aria-label="How to use MarketLens">
+            <button type="button" class="quick-start-card" id="quick-connect"><span class="quick-start-number" aria-hidden="true">1</span><span class="quick-start-copy"><strong>Connect</strong> Connect your Zerodha account to load market data.<span class="quick-start-action">Connect account →</span></span></button>
+            <a class="quick-start-card" href="#stock-search"><span class="quick-start-number" aria-hidden="true">2</span><span class="quick-start-copy"><strong>Explore</strong> Search for a stock, open its chart and add it to your watchlist.<span class="quick-start-action">Find stocks →</span></span></a>
+            <a class="quick-start-card" href="#strategy-lab"><span class="quick-start-number" aria-hidden="true">3</span><span class="quick-start-copy"><strong>Practice first</strong> Check the rule and test it with paper money before reviewing an order.<span class="quick-start-action">Open practice tools →</span></span></a>
           </section>
 
           <section class="market-grid" aria-label="Market snapshot">
@@ -82,41 +90,19 @@
                 <label class="select-wrap"><span class="visually-hidden">Filter by exchange</span><select id="signal-filter"><option value="all">All exchanges</option><option value="NSE">NSE</option><option value="BSE">BSE</option></select></label>
                 <label class="select-wrap"><span class="visually-hidden">Sort stocks</span><select id="stock-sort"><option value="featured">Featured stocks</option><option value="score">Highest indicator score</option><option value="change">Largest daily move</option><option value="name">Name A–Z</option></select></label>
               </div>
-              <div class="table-wrap">
+              <p class="table-scroll-hint hidden" id="search-status" role="status"></p>
+              <div class="table-wrap" role="region" aria-label="Market watch table" tabindex="0">
                 <table>
                   <thead><tr><th>COMPANY</th><th>LIVE PRICE</th><th>DAY CHANGE</th><th>TREND</th><th>SCORE</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
                   <tbody id="stock-rows"></tbody>
                 </table>
                 <div class="empty-state hidden" id="empty-stocks">No stocks match your search.</div>
               </div>
+              <p class="table-scroll-hint">Scroll the table sideways to see all columns and chart actions when needed.</p>
               <div class="table-foot" id="quote-foot">Connect to Zerodha for live quotes. Quotes can be delayed or unavailable outside exchange hours.</div>
             </div>
 
             <aside class="right-column">
-              <section class="panel market-scan-panel">
-                <div class="panel-heading compact-heading"><div><p class="eyebrow">ROTATING NSE / BSE SCAN</p><h2>Market candidates</h2></div><button class="text-link" id="scan-toggle" disabled>Pause</button></div>
-                <p class="panel-description">Daily and 5-minute matches: close above SMA 20 above SMA 50, with RSI 45–70. A rotating scan across available equity instruments is not a real-time or complete market view.</p>
-                <div id="scan-status" class="account-updated" role="status">Connect Zerodha to start the scan.</div>
-                <div id="scan-content" role="region" aria-label="Market candidate results" aria-live="polite" tabindex="0"></div>
-                <p class="fine-print">Example entry = completed candle close; sell target = close + 3 ATR; stop = close − 1.5 ATR. Prices are not live order recommendations and may be stale. Targets may never be reached; gaps, liquidity, fees and taxes can cause losses. Verify the instrument and current price before any order. The scan continues on the server while connected; use Pause to stop it.</p>
-              </section>
-              <section class="panel" id="jio-review">
-                <div class="panel-heading compact-heading"><div><p class="eyebrow">JIO · DAILY RULE REVIEW</p><h2>Jio stocks</h2></div><button class="text-link" id="refresh-jio" disabled>Refresh</button></div>
-                <p class="panel-description">Automatic daily-candle checks for Jio Platforms and Jio Financial Services.</p>
-                <div id="jio-status" class="account-updated" role="status">Connect Zerodha to load analysis.</div>
-                <div id="jio-content" aria-live="polite"></div>
-                <p class="fine-print">Rules and targets are hypothetical, not investment advice or a guarantee. Data can be delayed; orders require separate confirmation.</p>
-                <div class="funds-actions"><a href="https://www.jio.com/about/investor-relations/financials/financials-results/" target="_blank" rel="noopener noreferrer">Jio Platforms official financial results <span aria-hidden="true">↗</span></a><a href="https://www.jfs.in/financials/" target="_blank" rel="noopener noreferrer">Jio Financial Services official financials <span aria-hidden="true">↗</span></a></div>
-                <div class="research-panel">
-                  <h3>Public filing research</h3>
-                  <p>Search selected official Q2 FY2026-27 filings, not necessarily the latest. AI summaries are optional and can be incorrect.</p>
-                  <label for="research-symbol">Company</label>
-                  <select id="research-symbol"><option value="NSE:JPL">Jio Platforms</option><option value="NSE:JIOFIN">Jio Financial Services</option></select>
-                  <div class="research-actions"><button class="button button-secondary" id="research-evidence" type="button">Retrieve evidence</button><button class="button button-secondary" id="research-generate" type="button">Generate AI summary</button></div>
-                  <p>AI summary uses the configured provider. With OpenAI or auto fallback, selected public filing excerpts are sent to OpenAI; no account or market data is included. Charges may apply.</p>
-                  <div id="research-result" role="status" aria-live="polite"></div>
-                </div>
-              </section>
               <section class="panel ideas-panel" id="trade-ideas">
                 <div class="panel-heading compact-heading"><div><p class="eyebrow">DAILY RULES · NOT ADVICE</p><h2>Buy / sell watch</h2></div><button class="text-link" id="refresh-ideas" disabled>Refresh</button></div>
                 <p class="panel-description">Watchlist entries and Zerodha holdings, based on the last completed daily candle.</p>
@@ -124,60 +110,36 @@
                 <div id="ideas-content" aria-live="polite"></div>
                 <p class="fine-print">Buy rule: close &gt; SMA 20 &gt; SMA 50 and RSI 45–70. Sell review: close &lt; SMA 20 or RSI &gt; 75. Illustrative target = daily close + 3 ATR; stop = close − 1.5 ATR. Neither is a forecast or an order. Targets are not tied to your holding's purchase price. No profit is guaranteed; prices, fees and execution can differ. Verify holdings and all orders in Zerodha.</p>
               </section>
-              <section class="panel account-panel" id="account">
-                <div class="panel-heading compact-heading"><div><p class="eyebrow">READ ONLY · ZERODHA</p><h2>Account snapshot</h2></div><button class="text-link" id="refresh-account">Refresh</button></div>
-                <p class="account-updated" id="account-updated">Connect Zerodha to retrieve account details.</p>
-                <div class="account-tabs" role="tablist" aria-label="Zerodha account information">
-                  <button class="account-tab active" id="account-tab-funds" role="tab" aria-controls="account-tab-content" aria-selected="true" tabindex="0" data-account-tab="funds">Funds</button>
-                  <button class="account-tab" id="account-tab-holdings" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="holdings">Holdings</button>
-                  <button class="account-tab" id="account-tab-positions" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="positions">Positions</button>
-                  <button class="account-tab" id="account-tab-orders" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="orders">Orders</button>
-                  <button class="account-tab" id="account-tab-trades" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="trades">Trades</button>
-                  <button class="account-tab" id="account-tab-profile" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="profile">Profile</button>
-                </div>
-                <div class="account-tab-content" id="account-tab-content" role="tabpanel" aria-labelledby="account-tab-funds" tabindex="0" aria-live="polite">
-                  <p class="account-empty">Your profile, funds, holdings, positions, orders and trades will appear here after connecting.</p>
-                </div>
-                <div class="funds-actions">
-                  <h3>Manage funds with Zerodha</h3>
-                  <p>Payments and bank details are handled on Zerodha. MarketLens does not collect or store them.</p>
-                  <a href="https://kite.zerodha.com/" target="_blank" rel="noopener noreferrer">Open Kite for deposits or withdrawals <span aria-hidden="true">↗</span></a>
-                  <a href="https://console.zerodha.com/account/bank" target="_blank" rel="noopener noreferrer">Manage linked bank accounts in Console <span aria-hidden="true">↗</span></a>
-                </div>
-              </section>
-              <section class="panel watchlist-panel" id="watchlist">
-                <div class="panel-heading compact-heading"><div><p class="eyebrow">KEEP TRACK</p><h2>Your watchlist</h2></div><span class="count-pill" id="watchlist-count">0</span></div>
-                <div class="watchlist-items" id="watchlist-items"></div>
-                <div class="watchlist-empty" id="watchlist-empty">Save stocks with the ☆ button to follow them here.</div>
-              </section>
-              <section class="panel planner-panel" id="risk-planner">
-                <div class="panel-heading compact-heading"><div><p class="eyebrow">PLAN YOUR RISK</p><h2>Position planner</h2></div><span class="planner-symbol" aria-hidden="true">◈</span></div>
-                <p class="panel-description">Estimate a position size using a hypothetical risk limit.</p>
-                <form id="planner-form" class="planner-form">
-                  <label>Account value <span class="input-with-prefix"><span>₹</span><input id="account-value" type="number" min="1" step="100" value="100000" required></span></label>
-                  <label>Risk per idea <span class="input-with-suffix"><input id="risk-percent" type="number" min="0.1" max="5" step="0.1" value="1" required><span>%</span></span></label>
-                  <label>Entry price <span class="input-with-prefix"><span>₹</span><input id="entry-price" type="number" min="0.01" step="0.05" value="1000" required></span></label>
-                  <label>Stop price <span class="input-with-prefix"><span>₹</span><input id="stop-price" type="number" min="0.01" step="0.05" value="950" required></span></label>
-                  <div class="planner-result"><span>Estimated max shares</span><strong id="shares-result">20 shares</strong><small id="risk-result">About ₹1,000 at risk if the stop is reached</small></div>
-                  <button class="button button-secondary" type="submit">Update estimate <span aria-hidden="true">→</span></button>
-                </form>
-                <p class="fine-print">Estimate only; gaps, fees, taxes, and slippage may change actual losses. This does not check available funds.</p>
-              </section>
-              <section class="panel order-panel" id="order-ticket">
-                <div class="panel-heading compact-heading"><div><p class="eyebrow">MANUAL ONLY</p><h2>Limit order ticket</h2></div><span class="planner-symbol" aria-hidden="true">₹</span></div>
-                <p class="panel-description">Real CNC delivery orders. Review every detail and confirm explicitly before sending to Zerodha.</p>
-                <form id="order-form" class="order-form">
-                  <label>Equity (exchange:symbol) <input id="order-symbol" list="instrument-options" placeholder="NSE:RELIANCE" required disabled></label>
-                  <p class="fine-print">Type a symbol or company name for up to 50 matching suggestions.</p>
-                  <label>Action <select id="order-side"><option value="BUY">Buy</option><option value="SELL">Sell</option></select></label>
-                  <label>Quantity (shares) <input id="order-quantity" type="number" min="1" max="10000" step="1" value="1" required disabled></label>
-                  <label>Limit price <span class="input-with-prefix"><span>₹</span><input id="order-price" type="number" min="0.01" step="0.05" placeholder="Enter limit price" required disabled></span></label>
-                  <button class="button button-primary" id="preview-order" type="submit" disabled>Review order</button>
-                </form>
-                <p class="fine-print">Limit / CNC / DAY only. No market orders, intraday leverage, derivatives, or automatic execution.</p>
-                <div class="order-result hidden" id="order-result" role="status"></div>
-              </section>
             </aside>
+
+              <details class="extra-tools">
+                <summary><strong>More market tools</strong><span>Market candidates and Jio research. Scan continues while connected.</span></summary>
+                <p class="extra-tools-note">The market scan continues while connected, even when this section is closed. Open it to pause the scan.</p>
+                <section class="panel market-scan-panel">
+                  <div class="panel-heading compact-heading"><div><p class="eyebrow">ROTATING NSE / BSE SCAN</p><h2>Market candidates</h2></div><button class="text-link" id="scan-toggle" disabled>Pause</button></div>
+                  <p class="panel-description">Daily and 5-minute matches: close above SMA 20 above SMA 50, with RSI 45–70. A rotating scan across available equity instruments is not a real-time or complete market view.</p>
+                  <div id="scan-status" class="account-updated" role="status">Connect Zerodha to start the scan.</div>
+                  <div id="scan-content" role="region" aria-label="Market candidate results" aria-live="polite" tabindex="0"></div>
+                  <p class="fine-print">Example entry = completed candle close; sell target = close + 3 ATR; stop = close − 1.5 ATR. Prices are not live order recommendations and may be stale. Targets may never be reached; gaps, liquidity, fees and taxes can cause losses. Verify the instrument and current price before any order. The scan continues on the server while connected; use Pause to stop it.</p>
+                </section>
+                <section class="panel" id="jio-review">
+                  <div class="panel-heading compact-heading"><div><p class="eyebrow">JIO · DAILY RULE REVIEW</p><h2>Jio stocks</h2></div><button class="text-link" id="refresh-jio" disabled>Refresh</button></div>
+                  <p class="panel-description">Automatic daily-candle checks for Jio Platforms and Jio Financial Services.</p>
+                  <div id="jio-status" class="account-updated" role="status">Connect Zerodha to load analysis.</div>
+                  <div id="jio-content" aria-live="polite"></div>
+                  <p class="fine-print">Rules and targets are hypothetical, not investment advice or a guarantee. Data can be delayed; orders require separate confirmation.</p>
+                  <div class="funds-actions"><a href="https://www.jio.com/about/investor-relations/financials/financials-results/" target="_blank" rel="noopener noreferrer">Jio Platforms official financial results <span aria-hidden="true">↗</span></a><a href="https://www.jfs.in/financials/" target="_blank" rel="noopener noreferrer">Jio Financial Services official financials <span aria-hidden="true">↗</span></a></div>
+                  <div class="research-panel">
+                    <h3>Public filing research</h3>
+                    <p>Search selected official Q2 FY2026-27 filings, not necessarily the latest. AI summaries are optional and can be incorrect.</p>
+                    <label for="research-symbol">Company</label>
+                    <select id="research-symbol"><option value="NSE:JPL">Jio Platforms</option><option value="NSE:JIOFIN">Jio Financial Services</option></select>
+                    <div class="research-actions"><button class="button button-secondary" id="research-evidence" type="button">Retrieve evidence</button><button class="button button-secondary" id="research-generate" type="button">Generate AI summary</button></div>
+                    <p>AI summary uses the configured provider. With OpenAI or auto fallback, selected public filing excerpts are sent to OpenAI; no account or market data is included. Charges may apply.</p>
+                    <div id="research-result" role="status" aria-live="polite"></div>
+                  </div>
+                </section>
+              </details>
           </section>
 
           <section class="panel strategy-panel" id="strategy-lab">
@@ -220,6 +182,67 @@
             </div>
             <p class="fine-print strategy-disclaimer">No strategy can guarantee profits or prevent losses. Automated execution is paper-only; real orders remain manual and require explicit confirmation.</p>
           </section>
+
+          <div class="dashboard-tools" aria-label="Account and trading tools">
+            <section class="panel account-panel" id="account">
+              <div class="panel-heading compact-heading"><div><p class="eyebrow">READ ONLY · ZERODHA</p><h2>Account snapshot</h2></div><button class="text-link" id="refresh-account">Refresh</button></div>
+              <p class="account-updated" id="account-updated">Connect Zerodha to retrieve account details.</p>
+              <div class="account-tabs" role="tablist" aria-label="Zerodha account information">
+                <button class="account-tab active" id="account-tab-funds" role="tab" aria-controls="account-tab-content" aria-selected="true" tabindex="0" data-account-tab="funds">Funds</button>
+                <button class="account-tab" id="account-tab-holdings" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="holdings">Holdings</button>
+                <button class="account-tab" id="account-tab-positions" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="positions">Positions</button>
+                <button class="account-tab" id="account-tab-orders" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="orders">Orders</button>
+                <button class="account-tab" id="account-tab-trades" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="trades">Trades</button>
+                <button class="account-tab" id="account-tab-profile" role="tab" aria-controls="account-tab-content" aria-selected="false" tabindex="-1" data-account-tab="profile">Profile</button>
+              </div>
+              <div class="account-tab-content" id="account-tab-content" role="tabpanel" aria-labelledby="account-tab-funds" tabindex="0" aria-live="polite">
+                <p class="account-empty">Your profile, funds, holdings, positions, orders and trades will appear here after connecting.</p>
+              </div>
+              <div class="funds-actions">
+                <h3>Manage funds with Zerodha</h3>
+                <p>Payments and bank details are handled on Zerodha. MarketLens does not collect or store them.</p>
+                <a href="https://kite.zerodha.com/" target="_blank" rel="noopener noreferrer">Open Kite for deposits or withdrawals <span aria-hidden="true">↗</span></a>
+                <a href="https://console.zerodha.com/account/bank" target="_blank" rel="noopener noreferrer">Manage linked bank accounts in Console <span aria-hidden="true">↗</span></a>
+              </div>
+            </section>
+            <section class="panel watchlist-panel" id="watchlist">
+              <div class="panel-heading compact-heading"><div><p class="eyebrow">KEEP TRACK</p><h2>Your watchlist</h2></div><span class="count-pill" id="watchlist-count">0</span></div>
+              <div class="watchlist-items" id="watchlist-items"></div>
+              <div class="watchlist-empty" id="watchlist-empty">Save stocks with the ☆ button to follow them here.</div>
+            </section>
+            <section class="panel planner-panel" id="risk-planner">
+              <div class="panel-heading compact-heading"><div><p class="eyebrow">PLAN YOUR RISK</p><h2>Position planner</h2></div><span class="planner-symbol" aria-hidden="true">◈</span></div>
+              <p class="panel-description">Estimate a position size using a hypothetical risk limit.</p>
+              <form id="planner-form" class="planner-form">
+                <label>Account value <span class="input-with-prefix"><span>₹</span><input id="account-value" type="number" min="1" step="100" value="100000" required></span></label>
+                <label>Risk per idea <span class="input-with-suffix"><input id="risk-percent" type="number" min="0.1" max="5" step="0.1" value="1" required><span>%</span></span></label>
+                <label>Entry price <span class="input-with-prefix"><span>₹</span><input id="entry-price" type="number" min="0.01" step="0.05" value="1000" required></span></label>
+                <label>Stop price <span class="input-with-prefix"><span>₹</span><input id="stop-price" type="number" min="0.01" step="0.05" value="950" required></span></label>
+                <div class="planner-result"><span>Estimated max shares</span><strong id="shares-result">20 shares</strong><small id="risk-result">About ₹1,000 at risk if the stop is reached</small></div>
+                <button class="button button-secondary" type="submit">Update estimate <span aria-hidden="true">→</span></button>
+              </form>
+              <p class="fine-print">Estimate only; gaps, fees, taxes, and slippage may change actual losses. This does not check available funds.</p>
+            </section>
+            <section class="panel order-panel" id="order-ticket">
+              <div class="panel-heading compact-heading"><div><p class="eyebrow">MANUAL ONLY</p><h2>Limit order ticket</h2></div><span class="planner-symbol" aria-hidden="true">₹</span></div>
+              <p class="panel-description">Real CNC delivery orders. Review every detail and confirm explicitly before sending to Zerodha.</p>
+              <form id="order-form" class="order-form">
+                <label>Equity (exchange:symbol) <input id="order-symbol" list="instrument-options" placeholder="NSE:RELIANCE" required disabled></label>
+                <p class="fine-print">Type a symbol or company name for up to 50 matching suggestions.</p>
+                <label>Action <select id="order-side"><option value="BUY">Buy</option><option value="SELL">Sell</option></select></label>
+                <label>Quantity (shares) <input id="order-quantity" type="number" min="1" max="10000" step="1" value="1" required disabled></label>
+                <div class="order-price-grid">
+                  <label>Current price (last traded) <input id="order-current-price" type="text" placeholder="Unavailable" aria-describedby="order-quote-reference" readonly></label>
+                  <label>Pick price (limit price) <span class="input-with-prefix"><span>₹</span><input id="order-price" type="number" min="0.01" step="0.05" placeholder="Enter limit price" aria-describedby="order-price-help order-quote-reference" required disabled></span></label>
+                </div>
+                <p class="order-price-help" id="order-price-help">For a buy, enter the highest price you are willing to pay per share; for a sell, enter the lowest price you are willing to accept. Your order may not fill.</p>
+                <p class="order-price-help" id="order-quote-reference">Connect Zerodha to see a price reference for the selected stock.</p>
+                <button class="button button-primary" id="preview-order" type="submit" disabled>Review order</button>
+              </form>
+              <p class="fine-print">Limit / CNC / DAY only. No market orders, intraday leverage, derivatives, or automatic execution.</p>
+              <div class="order-result hidden" id="order-result" role="status"></div>
+            </section>
+          </div>
 
           <section class="panel alerts-panel" id="alerts">
             <div class="panel-heading">

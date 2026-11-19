@@ -11,6 +11,7 @@ import { backtestTrendStrategy, calculateIndicators } from "./lib/market-analysi
 import { createResearchService } from "./lib/research.js";
 import { createMarketScanner } from "./lib/market-scanner.js";
 import { historicalRange, normalizeCandles } from "./lib/historical-candles.js";
+import { createMarketSubscriptions } from "./lib/market-subscriptions.js";
 
 dotenv.config();
 
@@ -36,11 +37,12 @@ let connected = false;
 let tickerError = null;
 let instruments = [];
 let instrumentsByKey = new Map();
-let subscribedKeys = new Set([
+const defaultSubscribedKeys = [
   "NSE:NIFTY 50", "NSE:NIFTY BANK", "NSE:NIFTY IT", "BSE:SENSEX",
   "NSE:RELIANCE", "NSE:TCS", "NSE:INFY", "NSE:HDFCBANK",
   "NSE:ICICIBANK", "NSE:SBIN", "NSE:ITC", "NSE:LT"
-]);
+];
+const subscriptions = createMarketSubscriptions(defaultSubscribedKeys);
 let loginState = null;
 let loginStateExpires = 0;
 let loginInProgress = false;
@@ -119,7 +121,7 @@ function broadcast(payload) {
 
 function startTicker(accessToken) {
   stopTicker();
-  const tokens = [...subscribedKeys].map(key => instrumentsByKey.get(key)?.instrument_token).filter(Boolean);
+  const tokens = [...subscriptions.keys()].map(key => instrumentsByKey.get(key)?.instrument_token).filter(Boolean);
   if (!tokens.length) {
     tickerError = "No NSE/BSE equity instruments are available to stream.";
     return;
@@ -137,8 +139,11 @@ function startTicker(accessToken) {
     reconnectAttempts = 0;
     lastStreamError = "";
     tickerError = null;
-    activeTicker.subscribe(tokens);
-    activeTicker.setMode(activeTicker.modeQuote, tokens);
+    const currentTokens = [...subscriptions.keys()].map(key => instrumentsByKey.get(key)?.instrument_token).filter(Boolean);
+    if (currentTokens.length) {
+      activeTicker.subscribe(currentTokens);
+      activeTicker.setMode(activeTicker.modeQuote, currentTokens);
+    }
     broadcast({ type: "status", connected: true });
   });
   activeTicker.on("ticks", ticks => {
@@ -197,6 +202,17 @@ function startTicker(accessToken) {
 function closeWebSocket(client) {
   marketSocketClients.delete(client);
   client.close();
+}
+
+function updateTickerSubscriptions({ added, removed }) {
+  if (!ticker || !connected) return;
+  const removedTokens = removed.map(key => instrumentsByKey.get(key)?.instrument_token).filter(Boolean);
+  const addedTokens = added.map(key => instrumentsByKey.get(key)?.instrument_token).filter(Boolean);
+  if (removedTokens.length) ticker.unsubscribe(removedTokens);
+  if (addedTokens.length) {
+    ticker.subscribe(addedTokens);
+    ticker.setMode(ticker.modeQuote, addedTokens);
+  }
 }
 
 app.get("/api/status", (_req, res) => {
@@ -313,7 +329,7 @@ app.get("/auth/kite/callback", async (req, res) => {
     }
     scanner.reset(scanKeys);
     scanner.start();
-    subscribedKeys = new Set([...subscribedKeys].filter(key => instrumentsByKey.has(key)));
+    subscriptions.reset([...subscriptions.permanentKeys()].filter(key => instrumentsByKey.has(key)));
     startTicker(session.access_token);
     res.redirect("/");
   } catch (error) {
@@ -349,17 +365,13 @@ app.post("/api/market/subscribe", requireSameOrigin, requireSession, (req, res) 
   if (keys.some(key => !instrumentsByKey.has(key))) {
     return res.status(400).json({ error: "One or more instruments are not available in the current NSE/BSE instrument list." });
   }
-  const newKeys = keys.filter(key => !subscribedKeys.has(key));
-  if (subscribedKeys.size + newKeys.length > 150) {
-    return res.status(400).json({ error: "This local app can stream up to 150 symbols at once. Remove alerts/watchlist entries and restart to clear subscriptions." });
+  try {
+    const change = subscriptions.addPermanent(keys);
+    updateTickerSubscriptions(change);
+    res.json({ subscribed: keys.length, total: change.total });
+  } catch (error) {
+    res.status(400).json({ error: `${error.message} Restart the app to clear permanent subscriptions.` });
   }
-  newKeys.forEach(key => subscribedKeys.add(key));
-  const tokens = newKeys.map(key => instrumentsByKey.get(key).instrument_token);
-  if (ticker && connected && tokens.length) {
-    ticker.subscribe(tokens);
-    ticker.setMode(ticker.modeQuote, tokens);
-  }
-  res.json({ subscribed: keys.length, total: subscribedKeys.size });
 });
 
 app.get("/api/quotes", requireSession, async (req, res) => {
@@ -388,7 +400,8 @@ async function loadAnalysis(key, interval) {
   if (!client || !instrument?.isEquity) throw new Error("The Zerodha session or equity is unavailable.");
   const cacheKey = `${key}|${interval}`;
   const cached = analysisCache.get(cacheKey);
-  if (cached && Date.now() - cached.createdAt < (interval === "day" ? 15 * 60000 : 60000)) return cached.data;
+  if (cached && Date.now() - cached.createdAt < (interval === "day" ? 15 * 60000 : 60000) &&
+      (interval !== "5minute" || cached.createdAt >= Math.floor(Date.now() / 300000) * 300000)) return cached.data;
   const queued = historyQueue.then(async () => {
     const wait = Math.max(0, 400 - (Date.now() - lastHistoryRequestAt));
     if (wait) await new Promise(resolve => setTimeout(resolve, wait));
@@ -422,6 +435,19 @@ app.get("/api/analysis", requireSession, async (req, res) => {
     const data = await loadAnalysis(key, "day");
     if (data.indicators.error) return res.status(422).json({ error: data.indicators.error });
     res.json({ ...data, backtest: backtestTrendStrategy(data.candles, startingCapital) });
+  } catch (error) {
+    clientError(res, error);
+  }
+});
+
+app.get("/api/intraday-analysis", requireSession, async (req, res) => {
+  const key = String(req.query.symbol || "").toUpperCase();
+  if (!instrumentsByKey.get(key)?.isEquity) return res.status(400).json({ error: "Select a valid NSE or BSE equity." });
+  try {
+    const data = await loadAnalysis(key, "5minute");
+    if (data.indicators.error) return res.status(422).json({ error: data.indicators.error });
+    res.setHeader("Cache-Control", "no-store");
+    res.json(data);
   } catch (error) {
     clientError(res, error);
   }
@@ -617,11 +643,7 @@ app.post("/api/logout", requireSameOrigin, requireSession, (_req, res) => {
   instrumentsByKey.clear();
   analysisCache.clear();
   pendingOrders.clear();
-  subscribedKeys = new Set([
-    "NSE:NIFTY 50", "NSE:NIFTY BANK", "NSE:NIFTY IT", "BSE:SENSEX",
-    "NSE:RELIANCE", "NSE:TCS", "NSE:INFY", "NSE:HDFCBANK",
-    "NSE:ICICIBANK", "NSE:SBIN", "NSE:ITC", "NSE:LT"
-  ]);
+  subscriptions.reset(defaultSubscribedKeys);
   for (const client of marketSocketClients) closeWebSocket(client);
   res.json({ ok: true, message: "Local app session ended. Log out of Kite separately if needed." });
 });
@@ -635,6 +657,8 @@ app.get("/styles.css", (_req, res) => res.sendFile(path.join(__dirname, "styles.
 app.get("/lib/paper-simulation.js", (_req, res) => res.sendFile(path.join(__dirname, "lib", "paper-simulation.js")));
 app.get("/lib/trade-ideas.js", (_req, res) => res.sendFile(path.join(__dirname, "lib", "trade-ideas.js")));
 app.get("/lib/price-chart.js", (_req, res) => res.sendFile(path.join(__dirname, "lib", "price-chart.js")));
+app.get("/lib/market-analysis.js", (_req, res) => res.sendFile(path.join(__dirname, "lib", "market-analysis.js")));
+app.get("/lib/intraday-strategy.js", (_req, res) => res.sendFile(path.join(__dirname, "lib", "intraday-strategy.js")));
 
 httpServer.on("upgrade", (request, socket, head) => {
   if (request.url !== "/ws" || request.headers.origin !== origin || !kite) {
@@ -649,7 +673,49 @@ httpServer.on("upgrade", (request, socket, head) => {
   });
 });
 
-websocketServer.on("connection", client => client.on("close", () => marketSocketClients.delete(client)));
+websocketServer.on("connection", client => {
+  const chartScope = {};
+  client.on("message", raw => {
+    let message;
+    try {
+      message = JSON.parse(raw.toString());
+    } catch {
+      client.send(JSON.stringify({ type: "search-subscription", error: "Invalid search subscription request." }));
+      return;
+    }
+    if (message?.type === "chart-subscription") {
+      const key = message.symbol;
+      if (key !== "" && (typeof key !== "string" || !instrumentsByKey.get(key)?.isEquity)) {
+        client.send(JSON.stringify({ type: "chart-subscription", requestId: message.requestId, error: "Select an available equity." }));
+        return;
+      }
+      try {
+        updateTickerSubscriptions(subscriptions.replaceScope(chartScope, key ? [key] : []));
+        client.send(JSON.stringify({ type: "chart-subscription", requestId: message.requestId }));
+      } catch (error) {
+        client.send(JSON.stringify({ type: "chart-subscription", requestId: message.requestId, error: error.message }));
+      }
+      return;
+    }
+    if (message?.type !== "search-subscription") return;
+    const keys = message.symbols;
+    if (!Array.isArray(keys) || keys.length > 10 || keys.some(key => typeof key !== "string" || !instrumentsByKey.get(key)?.isEquity)) {
+      client.send(JSON.stringify({ type: "search-subscription", requestId: message.requestId, error: "Select up to 10 available equities." }));
+      return;
+    }
+    try {
+      updateTickerSubscriptions(subscriptions.replaceScope(client, keys));
+      client.send(JSON.stringify({ type: "search-subscription", requestId: message.requestId }));
+    } catch (error) {
+      client.send(JSON.stringify({ type: "search-subscription", requestId: message.requestId, error: error.message }));
+    }
+  });
+  client.on("close", () => {
+    marketSocketClients.delete(client);
+    updateTickerSubscriptions(subscriptions.replaceScope(client, []));
+    updateTickerSubscriptions(subscriptions.replaceScope(chartScope, []));
+  });
+});
 
 process.on("SIGINT", () => {
   stopTicker();
